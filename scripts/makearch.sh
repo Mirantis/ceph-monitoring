@@ -31,7 +31,7 @@ pushd "$tdir"
 
 if [[ $download_deps == "1" ]] ; then
     for name in $libs ; do
-        wget --no-check-certificate "https://github.com/${name}/archive/master.tar.gz"
+        wget --no-check-certificate "https://github.com/koder-ua/${name}/archive/master.tar.gz"
         tar --strip-components=1 -xzf master.tar.gz "${name}-master/${name}"
         rm master.tar.gz
     done

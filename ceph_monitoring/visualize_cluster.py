@@ -339,11 +339,17 @@ def show_ruleset_info(ceph: CephInfo) -> Table:
         total_free = sum(osd.free_space for osd in osds)
         row.free_size = f"{b2ssize(total_free)} ({total_free * 100 // total_sz}%)", total_free
 
-        total_data = sum(pool.df.size_bytes for pool in pools.get(rule.id, []))
-        row.data = f"{total_data // 2 ** 40} ({total_data * 100 // cluster_bytes}%)"
+        if cluster_bytes:
+            total_data = sum(pool.df.size_bytes for pool in pools.get(rule.id, []))
+            row.data = f"{total_data // 2 ** 40} ({total_data * 100 // cluster_bytes}%)"
+        else:
+            row.data = '-'
 
-        total_objs = sum(pool.df.num_objects for pool in pools.get(rule.id, []))
-        row.objs = f"{total_objs // 10 ** 3} ({total_objs * 100 // cluster_objects}%)"
+        if cluster_objects:
+            total_objs = sum(pool.df.num_objects for pool in pools.get(rule.id, []))
+            row.objs = f"{total_objs // 10 ** 3} ({total_objs * 100 // cluster_objects}%)"
+        else:
+            row.objs = '-'
 
         total_pg = sum(pool.pg for pool in pools.get(rule.id, []))
         row.pg = f"{total_pg} ({total_pg * 100 // cluster_pg}%)", total_pg

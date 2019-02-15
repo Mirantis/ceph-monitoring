@@ -521,7 +521,7 @@ class CephDataCollector(Collector):
                          'osd df',
                          'health detail',
                          "osd crush dump",
-                         "node_ls",
+                         "node ls",
                          "features",
                          "report",
                          "time-sync-status"])
@@ -599,22 +599,40 @@ class CephDataCollector(Collector):
         with self.chdir('hosts/' + self.node.name):
             self.save_output("cephdisk", "ceph-disk list")
             cephdisklist_js = self.save_output("cephdisk", "ceph-disk list --format=json", "json").stdout
+
+            code, _, ceph_vol_output = self.node.run("ceph-volume lvm list --format json")
+            if not code:
+                self.save("cephvolume_lvm", 'json', 0, ceph_vol_output)
+            else:
+                ceph_vol_output = None
+
             lsblk_js = self.save_output("lsblk", "lsblk -a --json", "json").stdout
             self.save_output("lsblk", "lsblk -a")
 
-        cephdisk_dct = json.loads(cephdisklist_js)
-        dev_tree = parse_devices_tree(json.loads(lsblk_js))
         devs_for_osd = {}  # type: Dict[int, Dict[str, str]]
+        dev_tree = parse_devices_tree(json.loads(lsblk_js))
 
-        for dev_info in cephdisk_dct:
-            for part_info in dev_info.get('partitions', []):
-                if "cluster" in part_info and part_info.get('type') == 'data':
-                    osd_id = int(part_info['whoami'])
-                    devs_for_osd[osd_id] = {attr: part_info[attr]
-                                            for attr in ("block_dev", "journal_dev", "path",
-                                                         "block.db_dev", "block.wal_dev")
-                                            if attr in part_info}
-                    devs_for_osd[osd_id]['store_type'] = 'filestore' if "journal_dev" in part_info else 'bluestore'
+        if ceph_vol_output:
+            cephvolume_dct = json.loads(ceph_vol_output)
+            for osd_id_s, osd_data in cephvolume_dct.items():
+                assert len(osd_data) == 1
+                osd_data = osd_data[0]
+                assert len(osd_data['devices']) == 1
+                dev = osd_data['devices'][0]
+                devs_for_osd[int(osd_id_s)] = {"block_dev": dev, "block.db_dev": dev, "block.wal_dev": dev,
+                                               'store_type': 'bluestore'}
+        else:
+            cephdisk_dct = json.loads(cephdisklist_js)
+
+            for dev_info in cephdisk_dct:
+                for part_info in dev_info.get('partitions', []):
+                    if "cluster" in part_info and part_info.get('type') == 'data':
+                        osd_id = int(part_info['whoami'])
+                        devs_for_osd[osd_id] = {attr: part_info[attr]
+                                                for attr in ("block_dev", "journal_dev", "path",
+                                                             "block.db_dev", "block.wal_dev")
+                                                if attr in part_info}
+                        devs_for_osd[osd_id]['store_type'] = 'filestore' if "journal_dev" in part_info else 'bluestore'
 
         for osd in self.node.osds:
             with self.chdir('osd/{}'.format(osd.id)):
@@ -1136,7 +1154,7 @@ class CollectorCoordinator:
             self.collect_load_data_at = time.time() + self.opts.load_collect_seconds
 
     def finish_load_collectors(self) -> Iterator[Callable]:
-        if LoadCollector.name in self.allowed_collectors:
+        if LoadCollector.name in self.allowed_collectors and self.load_collectors:
             stime = self.collect_load_data_at - time.time()
             if stime > 0:
                 logger.info("Waiting for %s seconds for performance collectors", int(stime + 0.5))
@@ -1412,6 +1430,11 @@ def main(argv: List[str]) -> int:
 
         if opts.save_to_git and opts.output_folder:
             sys.stderr.write("--output-folder can't be used with -g/-G option\n")
+            return 1
+
+        if 'load' in opts.collectors and not (opts.ceph_historic or opts.ceph_perf):
+            sys.stderr.write("At least one from --ceph-historic and --ceph-perf option must "
+                             "be passed for load collector\n")
             return 1
 
         # prepare output folder

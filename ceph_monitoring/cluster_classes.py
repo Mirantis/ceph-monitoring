@@ -655,6 +655,7 @@ class PGStatSum:
     num_whiteouts: int
     num_write: int
     num_write_kb: int
+    num_large_omap_objects: Optional[int] = None
 
 
 @dataclass

@@ -52,7 +52,11 @@ def get_img(plt: Any, format: str = 'svg') -> AnyStr:
         return bio.getvalue()  # type: ignore
     assert format == 'svg', f"Unknown format {format}"
     plt.savefig(bio, format='svg')
-    img_start = b"<!-- Created with matplotlib (http://matplotlib.org/) -->"
+    img_start1 = b"<!-- Created with matplotlib (http://matplotlib.org/) -->"
+    img_start2 = b"<!-- Created with matplotlib (https://matplotlib.org/) -->"
+    img_svg = bio.getvalue()
+    img_start = img_start1 if img_start1 in img_svg else img_start2
+    assert img_start in img_svg, "SVG format of matplotlib output has changed, update code accordingly"
     return bio.getvalue().split(img_start, 1)[1].decode("utf8")  # type: ignore
 
 

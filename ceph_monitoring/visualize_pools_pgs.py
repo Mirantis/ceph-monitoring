@@ -132,11 +132,17 @@ def show_pools_info(ceph: CephInfo) -> Table:
                 vl = html.fail(str(vl))
         row.size = vl, pool.size
 
-        obj_perc = pool.df.num_objects * 100 // total_objs
-        row.obj = f"{b2ssize_10(pool.df.num_objects)} ({obj_perc}%)", pool.df.num_objects
+        if total_objs:
+            obj_perc = pool.df.num_objects * 100 // total_objs
+            row.obj = f"{b2ssize_10(pool.df.num_objects)} ({obj_perc}%)", pool.df.num_objects
+        else:
+            row.obj = "-"
 
-        bytes_perc = pool.df.size_bytes * 100 // ceph.status.data_bytes
-        row.bytes = f"{b2ssize(pool.df.size_bytes)} ({bytes_perc}%)", pool.df.size_bytes
+        if ceph.status.data_bytes:
+            bytes_perc = pool.df.size_bytes * 100 // ceph.status.data_bytes
+            row.bytes = f"{b2ssize(pool.df.size_bytes)} ({bytes_perc}%)", pool.df.size_bytes
+        else:
+            row.bytes = '-'
 
         rule_name = ceph.crush.rules[pool.crush_rule].name
         cls_name = f"rule{rules_names.index(rule_name)}"
