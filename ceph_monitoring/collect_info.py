@@ -598,13 +598,9 @@ class CephDataCollector(Collector):
 
         with self.chdir('hosts/' + self.node.name):
             self.save_output("cephdisk", "ceph-disk list")
-            cephdisklist_js = self.save_output("cephdisk", "ceph-disk list --format=json", "json").stdout
-
-            code, _, ceph_vol_output = self.node.run("ceph-volume lvm list --format json")
-            if not code:
-                self.save("cephvolume_lvm", 'json', 0, ceph_vol_output)
-            else:
-                ceph_vol_output = None
+            self.save_output("cephvolume", "ceph-volume lvm list")
+            cephdisklist_js, code_disk = self.save_output("cephdisk", "ceph-disk list --format=json", "json")
+            cephvollist_js, code_vol = self.save_output("cephvolume", "ceph-volume lvm list --format json", "json")
 
             lsblk_js = self.save_output("lsblk", "lsblk -a --json", "json").stdout
             self.save_output("lsblk", "lsblk -a")
@@ -612,18 +608,20 @@ class CephDataCollector(Collector):
         devs_for_osd = {}  # type: Dict[int, Dict[str, str]]
         dev_tree = parse_devices_tree(json.loads(lsblk_js))
 
-        if ceph_vol_output:
-            cephvolume_dct = json.loads(ceph_vol_output)
+        if code_vol == 0:
+            cephvolume_dct = json.loads(cephvollist_js)
             for osd_id_s, osd_data in cephvolume_dct.items():
                 assert len(osd_data) == 1
                 osd_data = osd_data[0]
                 assert len(osd_data['devices']) == 1
                 dev = osd_data['devices'][0]
-                devs_for_osd[int(osd_id_s)] = {"block_dev": dev, "block.db_dev": dev, "block.wal_dev": dev,
-                                               'store_type': 'bluestore'}
-        else:
-            cephdisk_dct = json.loads(cephdisklist_js)
+                devs_for_osd[int(osd_id_s)] = {"block_dev": dev,
+                                               "block.db_dev": dev,
+                                               "block.wal_dev": dev,
+                                               "store_type": "bluestore"}
 
+        if code_disk == 0:
+            cephdisk_dct = json.loads(cephdisklist_js)
             for dev_info in cephdisk_dct:
                 for part_info in dev_info.get('partitions', []):
                     if "cluster" in part_info and part_info.get('type') == 'data':
