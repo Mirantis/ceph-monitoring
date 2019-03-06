@@ -10,9 +10,20 @@ How to collect data:
 * Only Jewel(10) and more resent versions of ceph are supported, for older ceph see 'old' branch
 * ssh to any node, which has ssh access to all ceph nodes
 * python3.4+ required on collection node, python2.7 required in all other nodes
-* Passwordless ssh access need to be setup to all required nodes. If you key are encrypted you need to decrypt it,
-  put decrypted key as default ~/.ssh/id_rsa file, run tool and then remove decrypted key. Usually you can
-  decrypt ssh key with `openssl rsa –in enc.key -out dec.key`.
+* Passwordless ssh access need to be setup to all required nodes. If you key are encrypted you need to
+  decrypt it,put decrypted key as default ~/.ssh/id_rsa file, run tool and then remove decrypted key.
+  Usually you can decrypt ssh key with `openssl rsa –in enc.key -out dec.key`.
+* In case if you can't put you private ssh key to master node you need to add it on you local computer to
+  ssh-agent (https://help.github.com/en/articles/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent#adding-your-ssh-key-to-the-ssh-agent) and add '-A' to ssh, when connecting to remote host. In case if
+  jumphost is used you need to map master node 22 port to some port on jumphost first in order to -A
+  option to work. As example:
+
+        ssh -L 2234:target_host:22 jumphost
+  
+  After that from another shell (don't exit from first ssh):
+  
+        ssh target_user@jumphost -p 2234 -k target_system_key
+
 * If SSH daemons didn't listen on ceph client network - you need provide inventory file, which have IP's or names
   of all ceph nodes, usable for ssh. Inventory must be in format one IP_or_name per line.
 * root or user with passwordless sudo need to used. In second case pass `-u USER_NAME --sudo` options.
@@ -21,7 +32,7 @@ How to collect data:
 * In simplest case collect cluster info can be done with (see below for MCP example):
   Please take into account that all file paths must be absolute.
 
-  `bash ceph_report.sh -c node,ceph -l DEBUG ADDITIONAL_OPTIONS`
+    `bash ceph_report.sh -c node,ceph -l DEBUG ADDITIONAL_OPTIONS`
 
 Additional options (in most cases you will need them all):
 - For passing inventory `--inventory INV_FILE`. Path to inventory must be absolute.
@@ -31,7 +42,7 @@ Additional options (in most cases you will need them all):
 
 For MCP in most cases you need to run it as
 
-    `bash ceph_report.sh -c node,ceph -l DEBUG --sudo --inventory INV_FILE_PATH --ceph-master ANY_CEPH_NODE`
+    bash ceph_report.sh -c node,ceph -l DEBUG --sudo --inventory INV_FILE_PATH --ceph-master ANY_CEPH_NODE
 
 * See `bash ceph_report.sh --help` for usage, if needed
 * Follow the logs, in case of error it should give you a hint what's broken, or what package is missing
