@@ -125,6 +125,47 @@ class Report:
                                     doc.center(block)
         return doc
 
+    def encrypt(self, doc: html.Doc, password: str, static_files_dir: Path, output_dir: Path):
+        body_s = str(doc) + " "
+        if len(body_s) % 32:
+            body_s += " " * (32 - len(body_s) % 32)
+
+        import os
+        import base64
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.backends import default_backend
+
+        backend = default_backend()
+        iv = os.urandom(16)
+        cipher = Cipher(algorithms.AES(password), modes.CBC(iv), backend=backend)
+        encryptor = cipher.encryptor()
+        encrypted_body = iv + encryptor.update(body_s.encode("utf8")) + encryptor.finalize()
+        encrypted_body_base64 = base64.b64encode(encrypted_body)
+
+        step = 128
+        header = 'encrypted = "'
+        idx = step - len(header)
+        header += encrypted_body_base64[0: idx] + '"'
+        parts = [header]
+        while idx < len(encrypted_body_base64):
+            parts.append(' + "' + encrypted_body_base64[idx: idx + step] + '"')
+            idx += step
+
+        enc_code = " \\\n      ".join(parts)
+        doc = html.Doc()
+        _, link_or_data = self.insert_js_css("aesjs.js", True, static_files_dir, output_dir)
+
+        with doc.head:
+            doc.script(type="text/javascript", src=link_or_data)
+            doc.script(type="text/javascript")(enc_code)
+
+        with doc.body.center:
+            doc('Report encrypted, to encrypt enter password and press "decrypt": ')
+            doc.input(type="password", id="password")
+            doc.input(type="button",
+                      onclick="decode(document.getElementById('password').value)",
+                      value="Decrypt")
+
     def save_to(self, output_dir: Path, pretty_html: bool = False,
                 embed: bool = False, encrypt: str = None):
 
@@ -132,46 +173,9 @@ class Report:
         doc = self.make_body(embed, output_dir, static_files_dir)
 
         if encrypt:
+            logger.info("Encrypting report with AES")
             assert embed
-            body_s = str(doc) + " "
-            if len(body_s) % 32:
-                body_s += " " * (32 - len(body_s) % 32)
-
-            import os
-            import base64
-            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-            from cryptography.hazmat.backends import default_backend
-
-            backend = default_backend()
-            iv = os.urandom(16)
-            cipher = Cipher(algorithms.AES(encrypt), modes.CBC(iv), backend=backend)
-            encryptor = cipher.encryptor()
-            encrypted_body = iv + encryptor.update(body_s.encode("utf8")) + encryptor.finalize()
-            encrypted_body_base64 = base64.b64encode(encrypted_body)
-
-            step = 128
-            header = 'encrypted = "'
-            idx = step - len(header)
-            header += encrypted_body_base64[0: idx] + '"'
-            parts = [header]
-            while idx < len(encrypted_body_base64):
-                parts.append(' + "' + encrypted_body_base64[idx: idx + step] + '"')
-                idx += step
-
-            enc_code = " \\\n      ".join(parts)
-            doc = html.Doc()
-            _, link_or_data = self.insert_js_css("aesjs.js", embed, static_files_dir, output_dir)
-
-            with doc.head:
-                doc.script(type="text/javascript", src=link_or_data)
-                doc.script(type="text/javascript")(enc_code)
-
-            with doc.body.center:
-                doc('Report encrypted, to encrypt enter password and press "decrypt": ')
-                doc.input(type="password", id="password")
-                doc.input(type="button",
-                          onclick="decode(document.getElementById('password').value)",
-                          value="Decrypt")
+            self.encrypt(doc, encrypt, static_files_dir, output_dir)
 
         index = f"<!doctype html>{doc}"
         index_path = output_dir / self.output_file_name

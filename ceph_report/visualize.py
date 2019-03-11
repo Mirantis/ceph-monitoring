@@ -70,7 +70,7 @@ def parse_args(argv):
     p.add_argument("-p", "--pretty-html", help="Prettify index.html", action="store_true")
     p.add_argument("--profile", help="Profile report creation", action="store_true")
     p.add_argument("-e", "--embed", action='store_true', help="Embed js/css files into report to make it stand-alone")
-    p.add_argument("--encrypt", help="Encrypt file, only work with --embed")
+    p.add_argument("--encrypt", metavar="PASSWORD", default=None, help="Encrypt file, only work with --embed")
     p.add_argument("path", help="Folder with data, or .tar.gz archive")
     p.add_argument("old_path", nargs='?', help="Older folder with data, or .tar.gz archive to calculate load")
     return p.parse_args(argv[1:])

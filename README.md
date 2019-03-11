@@ -59,7 +59,8 @@ How to visualize result:
     - `git clone https://github.com/Mirantis/ceph-monitoring.git`
     - `cd ceph-monitoring`
     - `bash prepare.sh`
+    - `apt install graphviz`
     - `source venv3/bin/activate`
-* read `python -m ceph_monitoring.visualize_cluster --help` and update next command line if nessesary
-* `python -m ceph_monitoring.visualize_cluster -l DEBUG -w --embed -o REPORT_OUTPUT_FOLDER RESULT_ARCHIVE_PATH`
+* read `python -m ceph_report.visualize --help` and update next command line if nessesary
+* `python -m ceph_report.visualize -l DEBUG -w --embed -o REPORT_OUTPUT_FOLDER RESULT_ARCHIVE_PATH`
 * Open REPORT_OUTPUT_FOLDER/index.html in browser

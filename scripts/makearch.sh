@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
-set -ex
+set -o errexit
 set -o pipefail
+set -o nounset
 
-binpath=$(realpath "$0")
-libs="cephlib agent xmlbuilder3"
+readonly exec="${0}"
+readonly binpath=$(realpath "$exec")
+readonly libs="cephlib agent xmlbuilder3"
 
-if [[ $1 == "--local" ]] ; then
+if [[ "${1}" == "--local" ]] ; then
     shift 1
     download_deps="0"
     libpaths=""
     for lib in $libs ; do
         initpath=$(python -c "import ${lib}; print(${lib}.__file__)")
-        libpath=$(dirname "$initpath")
-        while [ -L "$libpath" ] ; do
-            libpath=$(readlink -f "$libpath")
+        libpath=$(dirname "${initpath}")
+        while [ -L "${libpath}" ] ; do
+            libpath=$(readlink -f "${libpath}")
         done
         libpaths="${libpaths} ${libpath}"
     done
@@ -50,8 +52,8 @@ else
     cp "${cmdir}/binary/typing-3.6.4.tar.gz" .
 fi
 
-cp "${cdir}/ceph_monitoring/collect_info.py" .
-cp "${cdir}/ceph_monitoring/logging.json" .
+cp "${cdir}/ceph_report/collect_info.py" .
+cp "${cdir}/ceph_report/logging.json" .
 tar -zcf "$archfile" ./*
 cat "${cdir}/scripts/unpack.sh" "$archfile" > "$output_file"
 chmod +x "$output_file"

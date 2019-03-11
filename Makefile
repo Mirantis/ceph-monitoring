@@ -1,8 +1,8 @@
 .PHONY: mypy pylint pylint_e prepare archive
 
-ALL_FILES=$(shell find ceph_monitoring/ -type f -name '*.py')
-# ALL_FILES=ceph_monitoring/collect_info.py
-# ALL_FILES=ceph_monitoring/visualize_cluster.py ceph_monitoring/resource_usage.py ceph_monitoring/osd_ops.py ceph_monitoring/hw_info.py ceph_monitoring/cluster.py
+ALL_FILES=$(shell find ceph_report/ -type f -name '*.py')
+# ALL_FILES=ceph_report/collect_info.py
+# ALL_FILES=ceph_report/visualize_cluster.py ceph_report/resource_usage.py ceph_report/osd_ops.py ceph_report/hw_info.py ceph_report/cluster.py
 STUBS="/home/koder/workspace/typeshed"
 
 mypy:

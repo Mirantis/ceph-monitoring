@@ -656,15 +656,15 @@ class CephDataCollector(Collector):
 
                 stor_type = devs_for_osd[osd.id]['store_type']
 
-                if stor_type == 'filestore':
-                    cmd = "ls -1 '{0}'".format(os.path.join(osd.storage, 'current'))
-                    code, _, res = self.node.run(cmd)
-
-                    if code == 0:
-                        pgs = [name.split("_")[0] for name in res.split() if "_head" in name]
-                        res = "\n".join(pgs)
-
-                    self.save("pgs", "txt", code, res)
+                # if stor_type == 'filestore':
+                #     cmd = "ls -1 '{0}'".format(os.path.join(osd.storage, 'current'))
+                #     code, _, res = self.node.run(cmd)
+                #
+                #     if code == 0:
+                #         pgs = [name.split("_")[0] for name in res.split() if "_head" in name]
+                #         res = "\n".join(pgs)
+                #
+                #     self.save("pgs", "txt", code, res)
 
                 if stor_type == 'filestore':
                     data_dev = devs_for_osd[osd.id]["path"]
@@ -696,6 +696,7 @@ class CephDataCollector(Collector):
                 self.collect_osd_process_info(pid)
 
     def collect_osd_process_info(self, pid: int):
+        logger.debug("Collecting info for OSD with pid %s", pid)
         assert isinstance(self.node, Node)
         cmdline = self.node.get_file('/proc/{}/cmdline'.format(pid)).decode('utf8')
         opts = cmdline.split("\x00")
@@ -1302,6 +1303,8 @@ def parse_args(argv: List[str]) -> Any:
     p.add_argument("-N", "--dont-pack-result", action="store_true", help="Don't create archive")
     p.add_argument("-o", "--output", help="Absolute path to result archive (only if -N don't set)")
     p.add_argument("-O", "--output-folder", help="Absolute path to result folder")
+    p.add_argument("--cluster", metavar="CLUSTER", default=None,
+                   help="Create archive with name /tmp/CLUSTER_DATE_TIME.tar.gz")
     p.add_argument("-p", "--pool-size", default=32, type=int, help="RPC/local worker pool size")
     p.add_argument("-s", "--load-collect-seconds", default=60, type=int, metavar="SEC",
                    help="Collect performance stats for SEC seconds")
@@ -1371,7 +1374,7 @@ def pack_output_folder(out_folder: str, out_file: Optional[str], log_level: str)
     if out_file is None:
         out_file = tmpnam(remove_after=False) + ".tar.gz"
 
-    code, _, res = Local().run("cd {} ; tar -zcvf {} *".format(out_folder, out_file))
+    code, _, res = Local().run("cd {} ; tar -zcvf {} *".format(out_folder, out_file), timeout=None)
     if code != 0:
         logger.error("Fail to archive results. Please found raw data at %r", out_folder)
     else:
@@ -1409,6 +1412,19 @@ def main(argv: List[str]) -> int:
         if opts.output_folder and not os.path.isabs(opts.output_folder):
             sys.stderr.write("--output-folder parameter must be absolute\n")
             return 1
+
+        if opts.cluster:
+            if opts.output:
+                sys.stderr.write("--output(-o) can't be used with --cluster\n")
+                return 1
+
+            if opts.save_to_git:
+                sys.stderr.write("--output(-o) can't be used with --save-to-git(-g)\n")
+                return 1
+
+            if opts.dont_pack_result and opts.cluste:
+                sys.stderr.write("--cluster can't be used with --don-pack-result(-N)\n")
+                return 1
 
         if opts.output and not os.path.isabs(opts.output):
             sys.stderr.write("--output parameter must be absolute\n")
@@ -1489,7 +1505,11 @@ def main(argv: List[str]) -> int:
                 target_log_file = None  # type: ignore
 
             if not opts.dont_pack_result:
-                pack_output_folder(out_folder, opts.output, opts.log_level)
+                if opts.cluster:
+                    output = "/tmp/{}_{:%Y_%h_%d.%H_%M}.tar.gz".format(opts.cluster, datetime.datetime.now())
+                else:
+                    output = opts.output
+                pack_output_folder(out_folder, output, opts.log_level)
 
             if opts.save_to_git:
                 assert isinstance(target_log_file, str) and isinstance(log_file, str)

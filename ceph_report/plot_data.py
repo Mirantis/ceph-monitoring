@@ -441,32 +441,39 @@ def plot_crush_rules(ceph: CephInfo, report: Report):
             # maps crush node id to html node id
             idmap: Dict[str, str] = {}
 
-            dot = f"digraph {rule.name} {{\n    overlap = scale;\n    "
-            dot += "\n    ".join(make_dot(root_node, idmap, id_prefix=rule.name + "_")) + "\n}"
-            svg = subprocess.check_output("neato -Tsvg", shell=True, input=dot.encode('utf8')).decode("utf8")
-            svg = svg[svg.index("<svg "):]
+            rule_name = rule.name.replace("-", '_')
+            dot = f"digraph {rule_name} {{\n    overlap = scale;\n    "
+            dot += "\n    ".join(make_dot(root_node, idmap, id_prefix=rule_name + "_")) + "\n}"
+            try:
+                svg = subprocess.check_output("neato -Tsvg", shell=True, input=dot.encode('utf8')).decode("utf8")
+            except subprocess.CalledProcessError as exc:
+                logger.error("Failed to convert .dot to svg with 'neato -Tsvg': %s\n%s", exc, dot)
+                svg = None
+            if svg:
+                svg = svg[svg.index("<svg "):]
 
-            targets = []
-            div_id = f'div_{rule.name}'
-            for func, name in [(get_weight_colors, 'weight'),
-                               (get_used_space_colors, 'used_space'),
-                               (get_data_size_colors, 'data_size'),
-                               (get_free_space_colors, 'free_space'),
-                               (get_free_perc_colors, 'free_perc')]:
+                targets = []
+                div_id = f'div_{rule_name}'
+                for func, name in [(get_weight_colors, 'weight'),
+                                   (get_used_space_colors, 'used_space'),
+                                   (get_data_size_colors, 'data_size'),
+                                   (get_free_space_colors, 'free_space'),
+                                   (get_free_perc_colors, 'free_perc')]:
 
-                colors = func(root_node, ceph, cmaps)
-                colors_js = {idmap[name]: v for name, v in colors.items() if not name.startswith("osd.")}
-                varname = f"colors_{rule.name}_{name}"
-                report.scripts.append(f"const {varname} = {json.dumps(colors_js)}")
+                    colors = func(root_node, ceph, cmaps)
+                    colors_js = {idmap[name]: v for name, v in colors.items() if not name.startswith("osd.")}
+                    varname = f"colors_{rule_name}_{name}"
+                    report.scripts.append(f"const {varname} = {json.dumps(colors_js)}")
 
-                linkid = f'ptr_crush_{rule.name}_{name}'
-                targets.append(
-                    f'''<span class="crushlink" onclick="setColors({varname}, '{div_id}', '{linkid}')" 
-                    id="{linkid}">{name}</span>''')
+                    linkid = f'ptr_crush_{rule_name}_{name}'
+                    targets.append(
+                        f'''<span class="crushlink" onclick="setColors({varname}, '{div_id}', '{linkid}')" 
+                        id="{linkid}">{name}</span>''')
 
-            report.onload.append(f"setColors(colors_{rule.name}_weight, '{div_id}', 'ptr_crush_{rule.name}_weight')")
-            targets = ',&nbsp;&nbsp;&nbsp;'.join(targets)
-            report.add_block(f"crush_svg_{rule.name}",
-                             None,
-                             f'''<div id="{div_id}"><center>{targets}</center></div><br>\n{svg}''',
-                             f"Tree for '{rule.name}'")
+                report.onload.append(f"setColors(colors_{rule_name}_weight, '{div_id}',"
+                                     f"'ptr_crush_{rule_name}_weight')")
+                targets = ',&nbsp;&nbsp;&nbsp;'.join(targets)
+                report.add_block(f"crush_svg_{rule_name}",
+                                 None,
+                                 f'''<div id="{div_id}"><center>{targets}</center></div><br>\n{svg}''',
+                                 f"Tree for '{rule_name}'")

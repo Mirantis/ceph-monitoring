@@ -38,8 +38,8 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> Table:
             if adapter.is_phy:
                 by_speed[adapter.speed if adapter.speed else 0] += 1
 
-        nets = "<br>".join((f"{speed * 8 / 10 ** 9:.1f} * {count}" if speed != 0 else "'Unknown' * {count}")
-                           for speed, count in sorted(by_speed.items()))
+        nets = "<br>".join((f"{speed * 8 / 10 ** 9:.1f} * {if_count}" if speed != 0 else f"'Unknown' * {if_count}")
+                           for speed, if_count in sorted(by_speed.items()))
 
         cl = host.find_interface(ceph.cluster_net)
         pb = host.find_interface(ceph.public_net)
@@ -60,9 +60,9 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> Table:
                         has_unknown = True
 
                 if adapter2 is cl:
-                    cluster_bw = f"{bw / 10 ** 9:.1}" + (" + unknown" if has_unknown else "")
+                    cluster_bw = f"{bw / 10 ** 9:.1f}" + (" + unknown" if has_unknown else "")
                 else:
-                    client_bw = f"{bw / 10 ** 9:.1}" + (" + unknown" if has_unknown else "")
+                    client_bw = f"{bw / 10 ** 9:.1f}" + (" + unknown" if has_unknown else "")
 
         disks = collections.defaultdict(collections.Counter)
         for disk in host.disks.values():

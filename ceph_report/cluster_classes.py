@@ -591,31 +591,33 @@ class CephStatus:
 
 
 class PGState(Enum):
-    active = 0
-    clean = 1
-    peering = 2
-    recovery_wait = 3
-    degraded = 4
-    remapped = 5
-    backfill_wait = 6
-    recovering = 7
-    backfilling = 8
-    creating = 9
-    activating = 10
+    activating = 1
+    active = 2
+    backfill_toofull = 3
+    backfill_unfound = 4
+    backfill_wait = 5
+    backfilling = 6
+    clean = 7
+    creating = 8
+    deep = 9
+    degraded = 10
     down = 11
-    inconsistent = 12
-    repair = 13
-    forced_recovery = 14
-    recovery_toofull = 16
-    recovery_unfound = 16
-    forced_backfill = 17
-    backfill_toofull = 18
-    backfill_unfound = 19
-    incomplete = 20
-    stale = 21
-    undersized = 22
-    peered = 23
-    snaptrim_error = 24
+    forced_backfill = 12
+    forced_recovery = 13
+    incomplete = 14
+    inconsistent = 15
+    peered = 16
+    peering = 17
+    recovering = 18
+    recovery_toofull = 19
+    recovery_unfound = 20
+    recovery_wait = 21
+    remapped = 22
+    repair = 23
+    scrubbing = 24
+    snaptrim_error = 25
+    stale = 26
+    undersized = 27
 
 
 @dataclass
