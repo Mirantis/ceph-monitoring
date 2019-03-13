@@ -22,7 +22,7 @@ fi
 tail "-n+${arch_content_pos}" "${archname}" | tar -zx -C "${tmpdir}"
 
 pushd "${tmpdir}"
-env PYTHONPATH=typing-3.6.2-py3-none-any.whl python3 collect_info.py "$@"
+env PYTHONPATH=typing.whl python3 collect_info.py "$@"
 code=$?
 popd >/dev/null
 

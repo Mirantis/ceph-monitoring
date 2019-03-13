@@ -44,12 +44,12 @@ else
 fi
 
 if [[ $download_deps == "1" ]] ; then
-    URL="https://files.pythonhosted.org/packages/ec/cc/28444132a25c113149cec54618abc909596f0b272a74c55bab9593f8876c/typing-3.6.4.tar.gz"
-    wget $URL
+    URL="https://files.pythonhosted.org/packages/4a/bd/eee1157fc2d8514970b345d69cb9975dcd1e42cd7e61146ed841f6e68309/typing-3.6.6-py3-none-any.whl"
+    wget $URL -O typing.whl
 else
     scripts_dir=$(dirname "$binpath")
     cmdir=$(dirname "$scripts_dir")
-    cp "${cmdir}/binary/typing-3.6.4.tar.gz" .
+    cp "${cmdir}/binary/typing.whl" .
 fi
 
 cp "${cdir}/ceph_report/collect_info.py" .
