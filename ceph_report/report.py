@@ -26,7 +26,8 @@ class Report:
             menu_item = header
         self.divs.append((name, header, menu_item, str(block_obj)))
 
-    def insert_js_css(self, link: str, embed: bool, static_files_dir: Path, output_dir: Path) -> Tuple[bool, str]:
+    def insert_js_css(self, link: str, embed: bool, static_files_dir: Path,
+                      output_dir: Optional[Path]) -> Tuple[bool, str]:
         def get_path(link: str) -> Tuple[bool, str]:
             if link.startswith("http://") or link.startswith("https://"):
                 return False, link
@@ -40,6 +41,7 @@ class Report:
             if embed:
                 data = open(fname, 'rb').read().decode("utf8")
             else:
+                assert output_dir is not None
                 shutil.copyfile(fname, output_dir / Path(fname).name)
         else:
             try:
@@ -52,7 +54,7 @@ class Report:
         else:
             return False, link
 
-    def make_body(self, embed: bool, output_dir: Path, static_files_dir) -> html.Doc:
+    def make_body(self, embed: bool, output_dir: Optional[Path], static_files_dir) -> html.Doc:
         self.style_links.append("bootstrap.min.css")
         self.style_links.append("report.css")
         self.script_links.append("report.js")
@@ -94,6 +96,7 @@ class Report:
                 if embed:
                     doc.script(code, type="text/javascript")
                 else:
+                    assert output_dir is not None
                     (output_dir / "onload.js").open("w").write(code)
                     doc.script(type="text/javascript", src="onload.js")
             with doc.body(onload="onload()"):
@@ -166,24 +169,28 @@ class Report:
                       onclick="decode(document.getElementById('password').value)",
                       value="Decrypt")
 
-    def save_to(self, output_dir: Path, pretty_html: bool = False,
-                embed: bool = False, encrypt: str = None):
+    def render(self, pretty_html: bool = False,
+               embed: bool = False, encrypt: str = None) -> str:
 
         static_files_dir = Path(__file__).absolute().parent.parent / "html_js_css"
-        doc = self.make_body(embed, output_dir, static_files_dir)
+        assert embed
+        doc = self.make_body(embed, None, static_files_dir)
 
-        if encrypt:
-            logger.info("Encrypting report with AES")
-            assert embed
-            self.encrypt(doc, encrypt, static_files_dir, output_dir)
+        assert not encrypt
+
+        # if encrypt:
+        #     logger.info("Encrypting report with AES")
+        #     assert embed
+        #     self.encrypt(doc, encrypt, static_files_dir, output_dir)
 
         index = f"<!doctype html>{doc}"
-        index_path = output_dir / self.output_file_name
         try:
             if pretty_html:
                 from bs4 import BeautifulSoup
                 index = BeautifulSoup.BeautifulSoup(index).prettify()
         except:
             pass
-        index_path.open("w").write(index)
+
+        # TODO: I dunno why it need's this
+        return index.replace("window.onload = sorttable.init", "")
 

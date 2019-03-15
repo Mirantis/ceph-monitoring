@@ -32,8 +32,8 @@ max_osd_per_class:
     nvme: 8
 
 allowed_schedulers:
-    virtio: [cfq, deadline, noop, null]
-    unknown: [cfq, deadline, noop, null]
+    virtio: [cfq, deadline, noop, none, null]
+    unknown: [cfq, deadline, noop, none, null]
     sata_hdd: [cfq, deadline]
     sas_hdd: [cfq, deadline]
     sata_ssd: [cfq, deadline, noop]

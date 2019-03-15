@@ -444,11 +444,13 @@ def plot_crush_rules(ceph: CephInfo, report: Report):
             rule_name = rule.name.replace("-", '_')
             dot = f"digraph {rule_name} {{\n    overlap = scale;\n    "
             dot += "\n    ".join(make_dot(root_node, idmap, id_prefix=rule_name + "_")) + "\n}"
+
             try:
                 svg = subprocess.check_output("neato -Tsvg", shell=True, input=dot.encode('utf8')).decode("utf8")
             except subprocess.CalledProcessError as exc:
                 logger.error("Failed to convert .dot to svg with 'neato -Tsvg': %s\n%s", exc, dot)
                 svg = None
+
             if svg:
                 svg = svg[svg.index("<svg "):]
 

@@ -1,4 +1,5 @@
 import io
+import pathlib
 import sys
 import json
 import pstats
@@ -45,13 +46,13 @@ from .plot_data import plot_crush_rules, show_osd_used_space_histo
 logger = logging.getLogger('report')
 
 
-def setup_logging(opts):
+def setup_logging(log_level: str):
     log_config = json.load((Path(__file__).parent / 'logging.json').open())
 
     del log_config["handlers"]['log_file']
 
-    if opts.log_level is not None:
-        log_config["handlers"]["console"]["level"] = opts.log_level
+    if log_level is not None:
+        log_config["handlers"]["console"]["level"] = log_level
 
     for settings in log_config["loggers"].values():
         settings['handlers'].remove('log_file')
@@ -59,78 +60,40 @@ def setup_logging(opts):
     logging.config.dictConfig(log_config)
 
 
-def parse_args(argv):
-    p = argparse.ArgumentParser()
-    p.add_argument("-l", "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-                   default=None, help="Console log level")
-    p.add_argument("-n", "--no-plots", help="Don't draw any plots, generate tables only", action="store_true")
-    p.add_argument("-N", "--name", help="Report name", default="Nemo")
-    p.add_argument("-o", '--out', help="report output folder", required=True)
-    p.add_argument("-w", '--overwrite', action='store_true',  help="Overwrite result folder data")
-    p.add_argument("-p", "--pretty-html", help="Prettify index.html", action="store_true")
-    p.add_argument("--profile", help="Profile report creation", action="store_true")
-    p.add_argument("-e", "--embed", action='store_true', help="Embed js/css files into report to make it stand-alone")
-    p.add_argument("--encrypt", metavar="PASSWORD", default=None, help="Encrypt file, only work with --embed")
-    p.add_argument("path", help="Folder with data, or .tar.gz archive")
-    p.add_argument("old_path", nargs='?', help="Older folder with data, or .tar.gz archive to calculate load")
-    return p.parse_args(argv[1:])
-
-
-def prepare_path(path: str) -> Tuple[bool, str]:
-    if Path(path).is_file():
-        folder = tempfile.mkdtemp()
+def prepare_path(path: pathlib.Path) -> Tuple[bool, pathlib.Path]:
+    if path.is_file():
+        folder = tempfile.mkdtemp(prefix="ceph_report_")
         logger.info("Unpacking %r to temporary folder %r", path, folder)
         subprocess.call(f"tar -zxvf {path} -C {folder} >/dev/null 2>&1", shell=True)
-        return True, folder
-    elif not Path(path).is_dir():
+        return True, pathlib.Path(folder)
+    elif not path.is_dir():
         logger.error("Path argument (%r) should be a folder with data or path to archive", path)
         raise ValueError()
     else:
         return False, path
 
 
-def main(argv: List[str]):
-    opts = parse_args(argv)
-    setup_logging(opts)
-
-    logger.info("Generating report from %r to %r", opts.path, opts.out)
-
-    if opts.profile:
-        prof = cProfile.Profile()
-        prof.enable()
-
-    remove_d1, d1_path = prepare_path(opts.path)
-
-    if opts.old_path:
-        remove_d2, d2_path = prepare_path(opts.old_path)
-    else:
-        remove_d2 = False
-        d2_path = None  # type: ignore
-
-    out_p = Path(opts.out)
-    index_path = out_p / 'index.html'
-    if index_path.exists():
-        if not opts.overwrite:
-            logger.error("%r already exists. Pass -w/--overwrite to overwrite files", index_path)
-            return 1
-    elif not out_p.exists():
-        out_p.mkdir(parents=True, exist_ok=True)
-
-    try:
+def make_report(name: str,
+                d1_path: pathlib.Path,
+                d2_path: pathlib.Path = None,
+                plot: bool = True,
+                pretty_html: bool = True,
+                embed: bool = True,
+                encrypt_passwd: str = None) -> str:
         logger.info("Loading collected data info into RAM")
         if d2_path:
-            cluster, ceph = load_all(TypedStorage(make_storage(d1_path, existing=True)))
-            cluster2, ceph2 = load_all(TypedStorage(make_storage(d2_path, existing=True)))
+            cluster, ceph = load_all(TypedStorage(make_storage(str(d1_path), existing=True)))
+            cluster2, ceph2 = load_all(TypedStorage(make_storage(str(d2_path), existing=True)))
             fill_usage(cluster, cluster2, ceph, ceph2)
             cluster.has_second_report = True
         else:
-            cluster, ceph = load_all(TypedStorage(make_storage(d1_path, existing=True)))
+            cluster, ceph = load_all(TypedStorage(make_storage(str(d1_path), existing=True)))
 
         fill_cluster_nets_roles(cluster, ceph)
 
         logger.info("Done")
 
-        report = Report(opts.name, "index.html")
+        report = Report(name, "index.html")
 
         cluster_reporters = [
             show_cluster_summary,
@@ -159,9 +122,6 @@ def main(argv: List[str]):
             show_whole_cluster_nets,
             show_osd_used_space_histo,
             # show_osd_pg_histo,
-            # show_osd_load,
-            # show_osd_lat_heatmaps,
-            # show_osd_ops_boxplot,
             show_pg_size_kde,
             plot_crush_rules
         ]
@@ -171,7 +131,7 @@ def main(argv: List[str]):
         for reporter in cluster_reporters:
             if getattr(reporter, "perf_info_required", False) and not cluster.has_second_report:
                 continue
-            if getattr(reporter, 'plot', False) and opts.no_plots:
+            if getattr(reporter, 'plot', False) and not plot:
                 continue
 
             sig = inspect.signature(reporter)
@@ -191,16 +151,70 @@ def main(argv: List[str]):
         for _, host in sorted(cluster.hosts.items()):
             report.add_block(host_link(host.name).id, None, host_info(host, ceph))
 
-        report.save_to(Path(opts.out), opts.pretty_html, embed=opts.embed, encrypt=opts.encrypt)
-        logger.info("Report successfully stored to %r", index_path)
+        return report.render(pretty_html, embed=embed, encrypt=encrypt_passwd)
+
+
+def parse_args(argv):
+    p = argparse.ArgumentParser()
+    p.add_argument("-l", "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                   default=None, help="Console log level")
+    p.add_argument("--plot", help="Draw all plots", action="store_true")
+    p.add_argument("-N", "--name", help="Report name", default="Nemo")
+    p.add_argument("-o", '--out', help="report output folder", required=True)
+    p.add_argument("-w", '--overwrite', action='store_true',  help="Overwrite result folder data")
+    p.add_argument("-p", "--pretty-html", help="Prettify index.html", action="store_true")
+    p.add_argument("--profile", help="Profile report creation", action="store_true")
+    p.add_argument("-e", "--embed", action='store_true', help="Embed js/css files into report to make it stand-alone")
+    p.add_argument("--encrypt", metavar="PASSWORD", default=None, help="Encrypt file, only work with --embed")
+    p.add_argument("path", help="Folder with data, or .tar.gz archive")
+    p.add_argument("old_path", nargs='?', help="Older folder with data, or .tar.gz archive to calculate load")
+    return p.parse_args(argv[1:])
+
+
+def main(argv: List[str]):
+    opts = parse_args(argv)
+    setup_logging(opts.log_level)
+
+    logger.info("Generating report from %r to %r", opts.path, opts.out)
+
+    if opts.profile:
+        prof = cProfile.Profile()
+        prof.enable()
+
+    remove_d1, d1_path = prepare_path(pathlib.Path(opts.path))
+
+    if opts.old_path:
+        remove_d2, d2_path = prepare_path(pathlib.Path(opts.old_path))
+    else:
+        remove_d2 = False
+        d2_path = None  # type: ignore
+
+    out_p = Path(opts.out)
+    index_path = out_p / 'index.html'
+    if index_path.exists():
+        if not opts.overwrite:
+            logger.error("%r already exists. Pass -w/--overwrite to overwrite files", str(index_path))
+            return 1
+    elif not out_p.exists():
+        out_p.mkdir(parents=True, exist_ok=True)
+
+    try:
+        report = make_report(name=opts.name, d1_path=d1_path, d2_path=d2_path,
+                             plot=opts.plot,
+                             encrypt_passwd=opts.encrypt,
+                             embed=opts.embed,
+                             pretty_html=opts.pretty_html)
+
+        index_path.open("w").write(report)
+        logger.info("Report successfully stored to %r", str(index_path))
     except StopError:
         pass
     finally:
         if remove_d1:
-            shutil.rmtree(d1_path)
+            shutil.rmtree(str(d1_path))
         if remove_d2:
             assert d2_path
-            shutil.rmtree(d2_path)
+            shutil.rmtree(str(d2_path))
 
     if opts.profile:
         prof.disable()  # type: ignore

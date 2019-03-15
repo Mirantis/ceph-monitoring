@@ -354,7 +354,7 @@ def large_pools_pg(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report
             if sm_data * min_size_diff < lg_data and sm_pg > lg_pg:
                 pg_count_messed = True
                 report.add_extra_message(Severity.warning,
-                    f"Has subsantially less data then {lg_name} ({min_size_diff:.1f})" +
+                    f"Has substantially less data then {lg_name} ({min_size_diff:.1f})" +
                     f" but more PG {sm_pg} > {lg_pg}", pool_t(sm_name))
                 smaller_pools.append(sm_name)
     report.add_result(not pg_count_messed,
@@ -563,12 +563,12 @@ def storage_devs_schedulers(config: CheckConfig, cluster: Cluster, ceph: CephInf
     err_count = 0
     for node in cluster.hosts.values():
         for name, disk in node.disks.items():
-            allowed_schedulers = allowed_schedulers_dct.get(disk.tp.name, ['cfg', 'noop', 'deadline', None])
+            allowed_schedulers = allowed_schedulers_dct.get(disk.tp.name, ['cfg', 'noop', 'deadline', 'none', None])
             if disk.scheduler not in allowed_schedulers:
                 err_count += 1
                 report.add_extra_message(Severity.warning,
                     f"Disk {disk.name} has type {disk.tp.name} and scheduler {disk.scheduler}. " +
-                    f"Only {', '.join(allowed_schedulers)} schedulers recommended for this class",
+                    f"Only {', '.join(map(str, allowed_schedulers))} schedulers recommended for this class",
                     host_t(node.name))
 
     report.add_result(err_count == 0,

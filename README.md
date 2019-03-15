@@ -32,23 +32,24 @@ How to collect data:
 * In simplest case collect cluster info can be done with (see below for MCP example):
   Please take into account that all file paths must be absolute.
 
-    `bash ceph_report.sh -c node,ceph -l DEBUG ADDITIONAL_OPTIONS`
+    `bash ceph_report.sh --cluster CLUSTER_NAME --log-level DEBUG ADDITIONAL_OPTIONS`
 
 Additional options (in most cases you will need them all):
-- For passing inventory `--inventory INV_FILE`. Path to inventory must be absolute.
-- For non-root user `-u SSH_USER --sudo`
+- For passing inventory `--inventory INV_FILE`
 - If running from node, where no `ceph` cmd available `--ceph-master MASTER_NODE_NAME`
-- To overwrite previous report data `-w`
+- To overwrite previous report data `--wipe`
 
 For MCP in most cases you need to run it as
 
-    bash ceph_report.sh -c node,ceph -l DEBUG --sudo --inventory INV_FILE_PATH --ceph-master ANY_CEPH_NODE
+    bash ceph_report.sh --cluster CLUSTER_NAME --log-level DEBUG --inventory INV_FILE_PATH --ceph-master ANY_CEPH_NODE
 
 * See `bash ceph_report.sh --help` for usage, if needed
 * Follow the logs, in case of error it should give you a hint what's broken, or what package is missing
 * The last log message should looks like:
-  18:21:12 - INFO - Result saved into `/tmp/tmpv7tvwtlr.tar.gz`
+  18:21:12 - INFO - Result saved into `/tmp/CLUSTER_NAME.CURR_DATETIME.tar.gz`
 * If in doubt you can ignore warnings, if they appears in log. The file name in last log line is the name of results archive.
+* By default file placed into /tmp, you can change it with `--output-folder`.
+  Name template of the output file can not be changed.
 
 
 How to visualize result:

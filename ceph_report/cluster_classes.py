@@ -73,7 +73,7 @@ class LSHWInfo:
         else:
             res.append("CPU cores:")
             for info in self.cpu_info:
-                res.append(f"    {info.count} * {info.name}" if info.cores > 1 else f"    {info.name}")
+                res.append(f"    {info.cores} * {info.model}" if info.cores > 1 else f"    {info.model}")
 
         if self.storage_controllers:
             res.append("Disk controllers:")
@@ -97,7 +97,7 @@ class LSHWInfo:
         if self.net_info != {}:
             res.append("Net adapters:")
             for name, adapter in self.net_info.items():
-                res.append(f"    {name} {adapter.is_phy} duplex={adapter.speed}")
+                res.append(f"    {name} duplex={adapter.speed}")
         else:
             res.append("Net adapters: Failed to get net info")
 
