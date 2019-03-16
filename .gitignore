@@ -1,10 +1,8 @@
-*.pyc
 .idea/
 .mypy_cache/
-venv3/*
 .ipynb_checkpoints/
 Untitled.ipynb
 .dmypy.json
-/dist/
-/build/
-
+**/*.pyc
+ceph_report/files/enc_key.pub
+ceph_report/files/mira_report_storage.crt

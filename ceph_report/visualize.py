@@ -47,7 +47,7 @@ logger = logging.getLogger('report')
 
 
 def setup_logging(log_level: str):
-    log_config = json.load((Path(__file__).parent / 'logging.json').open())
+    log_config = json.load((Path(__file__).parent / 'files' / 'logging.json').open())
 
     del log_config["handlers"]['log_file']
 

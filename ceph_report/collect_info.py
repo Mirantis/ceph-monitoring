@@ -1,21 +1,21 @@
-import errno
 import re
 import abc
 import sys
 import time
 import json
 import zlib
+import errno
 import array
 import socket
 import random
 import shutil
+import pathlib
 import logging
 import os.path
-import tempfile
 import argparse
 import datetime
+import tempfile
 import ipaddress
-import traceback
 import threading
 import contextlib
 import subprocess
@@ -26,7 +26,7 @@ from typing import Dict, Any, List, Tuple, Set, Callable, Optional, Union, Type,
 
 from agent.agent import ConnectionClosed, SimpleRPCClient
 from cephlib.storage import make_storage, IStorageNNP
-from cephlib.common import run_locally, tmpnam, setup_logging
+from cephlib.common import run_locally
 from cephlib.rpc import init_node, rpc_run
 from cephlib.discover import get_osds_nodes, get_mons_nodes, OSDInfo
 
@@ -36,6 +36,10 @@ logger = logging.getLogger('collect')
 
 ExecResult = NamedTuple('ExecResult', [('code', int), ('output_b', bytes), ('output', str)])
 AUTOPG = -1
+
+
+base_files_path = os.path.join(os.path.dirname(sys.argv[0]), 'files')
+get_file_path = lambda fname: os.path.join(base_files_path, fname)
 
 
 #  -------------------   Node classes and interfaces -------------------------------------------------------------------
@@ -382,7 +386,7 @@ class Collector:
     def save(self, path: str, frmt: str, code: int, data: Union[str, bytes, array.array],
              extra: List[str] = None) -> str:
         """Save results into storage"""
-        if code == 0 and frmt == 'json':
+        if code == 0 and frmt == 'json' and self.pretty_json:
             assert isinstance(data, (str, bytes))
             data = json.dumps(json.loads(data), indent=4, sort_keys=True)
 
@@ -643,30 +647,33 @@ class CephDataCollector(Collector):
                 else:
                     logger.warning("osd-{} in node {} is down. No config available".format(osd.id, self.node.name))
 
-                stor_type = devs_for_osd[osd.id]['store_type']
+                if osd.id in devs_for_osd:
+                    stor_type = devs_for_osd[osd.id]['store_type']
 
-                if stor_type == 'filestore':
-                    data_dev = devs_for_osd[osd.id]["path"]
-                    j_dev = devs_for_osd[osd.id]["journal_dev"]
-                    osd_dev_conf = {'data': data_dev,
-                                    'journal': j_dev,
-                                    'r_data': dev_tree[data_dev],
-                                    'r_journal': dev_tree[j_dev],
-                                    'type': stor_type}
+                    if stor_type == 'filestore':
+                        data_dev = devs_for_osd[osd.id]["path"]
+                        j_dev = devs_for_osd[osd.id]["journal_dev"]
+                        osd_dev_conf = {'data': data_dev,
+                                        'journal': j_dev,
+                                        'r_data': dev_tree[data_dev],
+                                        'r_journal': dev_tree[j_dev],
+                                        'type': stor_type}
+                    else:
+                        assert stor_type == 'bluestore'
+                        data_dev = devs_for_osd[osd.id]["block_dev"]
+                        db_dev = devs_for_osd[osd.id].get('block.db_dev', data_dev)
+                        wal_dev = devs_for_osd[osd.id].get('block.wal_dev', db_dev)
+                        osd_dev_conf = {'data': data_dev,
+                                        'wal': wal_dev,
+                                        'db': db_dev,
+                                        'r_data': dev_tree[data_dev],
+                                        'r_wal': dev_tree[wal_dev],
+                                        'r_db': dev_tree[db_dev],
+                                        'type': stor_type}
+
+                    self.save('devs_cfg', 'json', 0, json.dumps(osd_dev_conf))
                 else:
-                    assert stor_type == 'bluestore'
-                    data_dev = devs_for_osd[osd.id]["block_dev"]
-                    db_dev = devs_for_osd[osd.id].get('block.db_dev', data_dev)
-                    wal_dev = devs_for_osd[osd.id].get('block.wal_dev', db_dev)
-                    osd_dev_conf = {'data': data_dev,
-                                    'wal': wal_dev,
-                                    'db': db_dev,
-                                    'r_data': dev_tree[data_dev],
-                                    'r_wal': dev_tree[wal_dev],
-                                    'r_db': dev_tree[db_dev],
-                                    'type': stor_type}
-
-                self.save('devs_cfg', 'json', 0, json.dumps(osd_dev_conf))
+                    self.save('devs_cfg', 'json', 0, json.dumps({}))
 
         pids = self.node.rpc.sensors.find_pids_for_cmd('ceph-osd')
         logger.debug("Found next pids for OSD's on node %s: %r", self.node.name, pids)
@@ -758,9 +765,14 @@ class CephDataCollector(Collector):
             log_issues = self.node.rpc.sensors.find_issues_in_ceph_log(self.opts.ceph_log_max_lines)
             self.save("ceph_log_wrn_err", "txt", 0, log_issues)
 
-            issues_count, regions = self.node.rpc.sensors.analyze_ceph_logs_for_issues()
-            self.save("log_issues_count", "json", 0, json.dumps(issues_count))
-            self.save("status_regions", "json", 0, json.dumps(regions))
+            # TODO: fix me
+            try:
+                # sometime unknown exc happened
+                issues_count, regions = self.node.rpc.sensors.analyze_ceph_logs_for_issues()
+                self.save("log_issues_count", "json", 0, json.dumps(issues_count))
+                self.save("status_regions", "json", 0, json.dumps(regions))
+            except Exception:
+                pass
 
             self.save_output("ceph_audit", tail_ln + " /var/log/ceph/ceph.audit.log")
             self.save_output("config", self.ceph_cmd + "daemon mon.{} config show".format(self.node.mon),
@@ -1158,58 +1170,52 @@ class CollectorCoordinator:
                     sum(len(node.osds) for node in self.nodes if node.osds))
 
 
-def parse_args(argv: List[str]) -> Any:
-    p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+def encrypt_and_upload(url: str,
+                       report_file: str,
+                       key_file: str,
+                       web_cert_file: str,
+                       http_user_password: str):
+    fd, enc_report = tempfile.mkstemp(prefix="ceph_report_", suffix=".enc")
+    os.close(fd)
+    cmd = ["bash", get_file_path("upload.sh"), report_file, enc_report, key_file, web_cert_file, url]
 
-    # primary settings
-    p.add_argument("--ceph-master", metavar="NODE", help="Run all ceph cluster commands from NODE")
-    p.add_argument("--inventory", metavar='FILE',
-                   help="Path to file with list of ssh ip/names of ceph nodes")
-    p.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-                   help="Console log level, see logging.json for defaults")
-    p.add_argument("--base-folder", default=".", help="Base folder for all paths")
-    p.add_argument("--dont-pack-result", action="store_true", help="Don't create archive")
-    p.add_argument("--cluster", help="Cluster name", required=True)
-    p.add_argument("--output-folder", help="Folder to put result to", default="/tmp")
-    p.add_argument("--no-sudo", action="store_true", help="Don't run agent with sudo on remote nodes")
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
+        stdout, stderr = proc.communicate((http_user_password + "\n").encode("utf8"))
+    finally:
+        if os.path.exists(enc_report):
+            os.unlink(enc_report)
 
-    # collection flags
-    p.add_argument("--no-rbd-info", action='store_true', help="Don't collect info for rbd volumes")
-    p.add_argument("--ceph-master-only", action="store_true", help="Run only ceph master data collection, " +
-                   "no info from osd/monitors would be collected")
-    p.add_argument("--ceph-extra", default="", help="Extra opts to pass to 'ceph' command")
-    p.add_argument("--detect-only", action="store_true", help="Don't collect any data, only detect cluster nodes")
-    p.add_argument("--no-pretty-json", action="store_true", help="Don't prettify json data")
+    if proc.returncode != 0:
+        logger.error("Fail to upload data: %s", stdout.decode("utf8").strip())
+        raise subprocess.CalledProcessError(cmd=" ".join(cmd), returncode=proc.returncode, output=stdout)
 
-    p.add_argument("--log-config", help="Absolute path to json file with logging config")
-    p.add_argument("--max-pg-dump-count", default=AUTOPG, type=int,
-                   help="maximum PG count to by dumped with 'pg dump' cmd, by default {} ".format(LUMINOUS_MAX_PG) +
-                   "for luminous, {} for other ceph versions".format(DEFAULT_MAX_PG))
-    p.add_argument("--ceph-log-max-lines", default=10000, type=int, help="Max lines from osd/mon log")
-    p.add_argument("--must-connect-to-all", action="store_true", help="Must successfully connect to all ceph nodes")
-
-    p.add_argument("--pool-size", default=32, type=int, help="RPC/local worker pool size")
-    p.add_argument("--ssh-opts", help="SSH cli options")
-    p.add_argument("--ssh-user", help="SSH user. Current user by default")
-    p.add_argument("--wipe", action='store_true', help="Wipe results directory before store data")
-    p.add_argument("--ssh-conn-timeout", default=60, type=int, help="SSH connection timeout")
-    p.add_argument("--cmd-timeout", default=60, type=int, help="Cmd's run timeout")
-
-    return p.parse_args(argv[1:])
+    logger.info("File successfully uploaded")
 
 
-def setup_logging2(log_level: str, log_config: Optional[str], out_folder: Optional[str]) -> Optional[str]:
-    default_lconf_path = os.path.join(os.path.dirname(__file__), 'logging.json')
-    log_config_fname = default_lconf_path if log_config is None else log_config
+def setup_logging(log_level: str, log_config_file: str, out_folder: Optional[str], persistent_log: bool = False):
+    log_config = json.load(open(log_config_file))
+    handlers = ["console"]
 
-    if out_folder is None:
-        log_file = '/dev/null'
-    else:
+    if out_folder:
+        handlers.append("log_file")
         log_file = os.path.join(out_folder, "log.txt")
+        log_config["handlers"]["log_file"]["filename"] = log_file
+    else:
+        del log_config["handlers"]["log_file"]
 
-    setup_logging(log_config_fname, log_file=log_file, log_level=log_level)
+    if persistent_log:
+        handlers.append("persistent_log_file")
+    else:
+        del log_config["handlers"]["persistent_log_file"]
 
-    return log_file if log_file != '/dev/null' else None
+    if log_level is not None:
+        log_config["handlers"]["console"]["level"] = log_level
+
+    for key in list(log_config['loggers']):
+        log_config['loggers'][key]["handlers"] = handlers
+
+    logging.config.dictConfig(log_config)
 
 
 def pack_output_folder(out_folder: str, out_file: str):
@@ -1220,7 +1226,7 @@ def pack_output_folder(out_folder: str, out_file: str):
         logger.info("Result saved into %r", out_file)
 
 
-def check_and_prepare_paths(opts: Any) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+def check_and_prepare_paths(opts: Any) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     inv_path = os.path.join(opts.base_folder, opts.inventory) if opts.inventory else None
 
     # verify options
@@ -1241,8 +1247,6 @@ def check_and_prepare_paths(opts: Any) -> Tuple[Optional[str], Optional[str], Op
     elif opts.dont_pack_result:
         output_arch = None
 
-    log_config = os.path.join(opts.base_folder, opts.log_config) if opts.log_config else None
-
     if output_folder is not None:
         if os.path.exists(output_folder):
             if opts.wipe:
@@ -1251,54 +1255,110 @@ def check_and_prepare_paths(opts: Any) -> Tuple[Optional[str], Optional[str], Op
         else:
             os.mkdir(output_folder)
 
-    return inv_path, output_folder, output_arch, log_config
+    return inv_path, output_folder, output_arch
+
+
+def parse_args(argv: List[str]) -> Any:
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
+    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                        help="Console log level, see logging.json for defaults")
+    parser.add_argument("--persistent-log", action="store_true",
+                        help="Log to /var/log/ceph_report_collector.log as well")
+
+    subparsers = parser.add_subparsers(dest='subparser_name')
+
+    collect = subparsers.add_parser('collect', help='Collect data')
+    collect.add_argument("--ceph-master", metavar="NODE", help="Run all ceph cluster commands from NODE")
+    collect.add_argument("--inventory", metavar='FILE',
+                         help="Path to file with list of ssh ip/names of ceph nodes")
+    collect.add_argument("--dont-pack-result", action="store_true", help="Don't create archive")
+    collect.add_argument("--cluster", help="Cluster name", required=True)
+    collect.add_argument("--output-folder", help="Folder to put result to", default="/tmp")
+    collect.add_argument("--no-sudo", action="store_true", help="Don't run agent with sudo on remote nodes")
+    collect.add_argument("--base-folder", default=".", help="Base folder for all paths")
+
+    # collection flags
+    collect.add_argument("--no-rbd-info", action='store_true', help="Don't collect info for rbd volumes")
+    collect.add_argument("--ceph-master-only", action="store_true", help="Run only ceph master data collection, " +
+                         "no info from osd/monitors would be collected")
+    collect.add_argument("--ceph-extra", default="", help="Extra opts to pass to 'ceph' command")
+    collect.add_argument("--detect-only", action="store_true", help="Don't collect any data, only detect cluster nodes")
+    collect.add_argument("--no-pretty-json", action="store_true", help="Don't prettify json data")
+
+    collect.add_argument("--max-pg-dump-count", default=AUTOPG, type=int,
+                         help="maximum PG count to by dumped with 'pg dump' cmd, by default {} ".format(LUMINOUS_MAX_PG)
+                         + "for luminous, {} for other ceph versions".format(DEFAULT_MAX_PG))
+    collect.add_argument("--ceph-log-max-lines", default=10000, type=int, help="Max lines from osd/mon log")
+    collect.add_argument("--must-connect-to-all", action="store_true",
+                         help="Must successfully connect to all ceph nodes")
+
+    collect.add_argument("--pool-size", default=32, type=int, help="RPC/local worker pool size")
+    collect.add_argument("--ssh-opts", help="SSH cli options")
+    collect.add_argument("--ssh-user", help="SSH user. Current user by default")
+    collect.add_argument("--wipe", action='store_true', help="Wipe results directory before store data")
+    collect.add_argument("--ssh-conn-timeout", default=60, type=int, help="SSH connection timeout")
+    collect.add_argument("--cmd-timeout", default=60, type=int, help="Cmd's run timeout")
+
+    upload = subparsers.add_parser('upload', help='Upload report to server')
+    upload.add_argument('--url', required=True, help="Url to upload to")
+    upload.add_argument('--key', default=get_file_path("enc_key.pub"), help="Server open key for data encryption")
+    upload.add_argument('--cert', default=get_file_path("mira_report_storage.crt"), help="Server cert file")
+    upload.add_argument('--upload-script-path', default=get_file_path("upload.sh"), help="upload.sh path")
+    upload.add_argument('--http-creds', required=True, help="Http user:password, as provided by mirantis support")
+    upload.add_argument('report', help="path to report archive")
+
+    return parser.parse_args(argv[1:])
 
 
 def main(argv: List[str]) -> int:
-    log_file = None
+    opts = parse_args(argv)
+    log_config = get_file_path("logging.json")
 
-    try:
-        opts = parse_args(argv)
-        inv_path, output_folder, output_arch, log_config = check_and_prepare_paths(opts)
-        log_file = setup_logging2(opts.log_level, log_config, output_folder)
-    except SystemExit:
-        raise
-    except Exception:
-        if log_file:
-            with open(log_file, 'wt') as fd:
-                fd.write(traceback.format_exc())
-        raise
-
-    try:
-        logger.info(repr(argv))
-        if output_folder:
-            if opts.dont_pack_result:
-                logger.info("Store data into %r", output_folder)
+    if opts.subparser_name == 'collect':
+        try:
+            inv_path, output_folder, output_arch = check_and_prepare_paths(opts)
+            setup_logging(opts.log_level, log_config, output_folder, opts.persistent_log)
+            logger.info(repr(argv))
+            if output_folder:
+                if opts.dont_pack_result:
+                    logger.info("Store data into %r", output_folder)
+                else:
+                    logger.info("Will store results into %s", output_arch)
+                    logger.info("Temporary folder %r", output_folder)
+                storage = make_storage(output_folder, existing=False, serializer='raw')
             else:
-                logger.info("Will store results into %s", output_arch)
-                logger.info("Temporary folder %r", output_folder)
-            storage = make_storage(output_folder, existing=False, serializer='raw')
-        else:
-            storage = None
+                storage = None
 
-        # run collect
-        with ThreadPoolExecutor(opts.pool_size) as executor:
-            CollectorCoordinator(storage, opts=opts, inventory=inv_path, executor=executor).collect()
+            # run collect
+            with ThreadPoolExecutor(opts.pool_size) as executor:
+                CollectorCoordinator(storage, opts=opts, inventory=inv_path, executor=executor).collect()
 
-        # compress/commit output folder
-        if output_folder:
-            if opts.dont_pack_result:
-                logger.warning("Unpacked tree is kept as --dont-pack-result option is set, so no archive created")
-                print("Result stored into", output_folder)
-            else:
-                pack_output_folder(output_folder, output_arch)
-                print("Result saved into", output_arch)
-                shutil.rmtree(output_folder)
-    except ReportFailed:
-        return 1
-    except Exception:
-        logger.exception("During make_storage/collect")
-        raise
+            # compress/commit output folder
+            if output_folder:
+                if opts.dont_pack_result:
+                    logger.warning("Unpacked tree is kept as --dont-pack-result option is set, so no archive created")
+                    print("Result stored into", output_folder)
+                else:
+                    pack_output_folder(output_folder, output_arch)
+                    print("Result saved into", output_arch)
+                    shutil.rmtree(output_folder)
+        except ReportFailed:
+            return 1
+        except Exception:
+            logger.exception("During make_storage/collect")
+            raise
+    else:
+        assert opts.subparser_name == 'upload'
+        setup_logging(opts.log_level, log_config, None, opts.persistent_log)
+        try:
+            encrypt_and_upload(url=opts.url,
+                               report_file=opts.report,
+                               key_file=opts.key,
+                               web_cert_file=opts.cert,
+                               http_user_password=opts.http_creds)
+        except subprocess.CalledProcessError:
+            pass
 
     return 0
 

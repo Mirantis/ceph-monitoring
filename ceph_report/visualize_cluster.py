@@ -73,7 +73,7 @@ def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report):
     """
     Cluster issues
     """
-    config = yaml.load((Path(__file__).parent / 'check_conf.yaml').open())
+    config = yaml.load((Path(__file__).parent / 'files' / 'check_conf.yaml').open())
     check_results = run_all_checks(config, cluster, ceph)
 
     t = html.HTMLTable("table-issues", ["Check", "Result", "Comment"], sortable=False)

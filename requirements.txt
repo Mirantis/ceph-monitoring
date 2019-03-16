@@ -1,3 +1,5 @@
+wheel
+aiohttp
 ipaddr
 logging_tree
 ifparser
@@ -9,3 +11,4 @@ seaborn
 matplotlib
 PyYAML
 cryptography
+aiohttp_security

@@ -1,0 +1,39 @@
+{
+    "version": 1,
+    "disable_existing_loggers": true,
+    "formatters": {
+        "simple": {
+            "format": "%(asctime)s - %(levelname)s - %(message)s",
+            "datefmt": "%H:%M:%S"
+        }
+    },
+    "handlers": {
+        "console": {
+            "level": "INFO",
+            "class": "logging.StreamHandler",
+            "formatter": "simple",
+            "stream"  : "ext://sys.stdout"
+        },
+        "log_file": {
+            "level": "DEBUG",
+            "class": "logging.FileHandler",
+            "formatter": "simple",
+            "filename": null
+        },
+        "persistent_log_file": {
+            "level": "DEBUG",
+            "class": "logging.FileHandler",
+            "formatter": "simple",
+            "filename": "/var/log/ceph_report_collector.log"
+        }
+    },
+    "loggers": {
+        "cmd":     {"level": "DEBUG", "handlers": ["FILLED_FROM_COLLECT_INFO_PY"]},
+        "storage": {"level": "DEBUG", "handlers": ["FILLED_FROM_COLLECT_INFO_PY"]},
+        "rpc":     {"level": "DEBUG", "handlers": ["FILLED_FROM_COLLECT_INFO_PY"]},
+        "cephlib": {"level": "DEBUG", "handlers": ["FILLED_FROM_COLLECT_INFO_PY"]},
+        "collect": {"level": "DEBUG", "handlers": ["FILLED_FROM_COLLECT_INFO_PY"]},
+        "agent":   {"level": "DEBUG", "handlers": ["FILLED_FROM_COLLECT_INFO_PY"]},
+        "report":  {"level": "DEBUG", "handlers": ["FILLED_FROM_COLLECT_INFO_PY"]}
+    }
+}
