@@ -1,13 +1,13 @@
-import functools
 import re
 import sys
 import ssl
+import json
 import os.path
 import argparse
-from typing import List
+import functools
+from typing import List, Dict
 
 from aiohttp import web, BasicAuth
-
 
 MAX_FILE_FIZE = 1 << 30
 
@@ -19,19 +19,32 @@ fname_re = r"(?:ceph_report\.)?(?P<name>.*?)" + \
 fname_rr = re.compile(fname_re)
 
 
-def basic_auth_middleware(user: str, password: str):
+def upload(func):
+    func.auth = 'upload'
+    return func
+
+
+def download(func):
+    func.auth = 'download'
+    return func
+
+
+def basic_auth_middleware(pwd_db: Dict[str: Dict[str, str]]):
     @web.middleware
     async def basic_auth(request, handler):
         basic_auth = request.headers.get('Authorization')
         if basic_auth:
             auth = BasicAuth.decode(basic_auth)
-            if auth.login == user and auth.password == password:
+            realm = getattr(handler, 'auth')
+            if auth.login == pwd_db[realm]['login'] and auth.password == pwd_db[realm]['password']:
                 return await handler(request)
+
         headers = {'WWW-Authenticate': 'Basic realm="{}"'.format('XXX')}
         return web.HTTPUnauthorized(headers=headers)
     return basic_auth
 
 
+@upload
 async def handle_put(target_dir: str, request):
     target_name = request.headers.get('Arch-Name')
     enc_passwd = request.headers.get('Enc-Password')
@@ -79,9 +92,7 @@ def parse_args(argv: List[str]):
     p = argparse.ArgumentParser()
     p.add_argument("--cert", required=True, help="cert file path")
     p.add_argument("--key", required=True, help="key file path")
-    p.add_argument("--user", required=True, help="BasicAuth user name")
-    p.add_argument("--password", required=True, help="BasicAuth user password")
-    p.add_argument("--storage-folder", required=True, help="Path to store files")
+    p.add_argument("--password-db", required=True, help="Json file with password database")
     p.add_argument("addr", default="0.0.0.0:80", help="Address to listen on")
     return p.parse_args(argv[1:])
 
@@ -91,7 +102,8 @@ def main(argv: List[str]):
     ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     ssl_context.load_cert_chain(opts.cert, opts.key)
 
-    app = web.Application(middlewares=[basic_auth_middleware(opts.user, opts.password)],
+    auth = basic_auth_middleware(json.load(open(opts.password_db)))
+    app = web.Application(middlewares=[],
                           client_max_size=MAX_FILE_FIZE)
     app.add_routes([web.put('/archives', functools.partial(handle_put, opts.storage_folder))])
 
