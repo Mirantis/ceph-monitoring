@@ -42,28 +42,15 @@ from .visualize_host_load import show_host_io_load_in_color, show_host_network_l
 from .visualize_osds import show_osd_state, show_osd_info, show_osd_perf_info, show_osd_pool_pg_distribution, \
                             show_osd_pool_agg_pg_distribution, show_osd_proc_info, show_osd_proc_info_agg
 from .plot_data import plot_crush_rules, show_osd_used_space_histo
+from .collect_info import setup_logging
 
 logger = logging.getLogger('report')
-
-
-def setup_logging(log_level: str):
-    log_config = json.load((Path(__file__).parent / 'files' / 'logging.json').open())
-
-    del log_config["handlers"]['log_file']
-
-    if log_level is not None:
-        log_config["handlers"]["console"]["level"] = log_level
-
-    for settings in log_config["loggers"].values():
-        settings['handlers'].remove('log_file')
-
-    logging.config.dictConfig(log_config)
 
 
 def prepare_path(path: pathlib.Path) -> Tuple[bool, pathlib.Path]:
     if path.is_file():
         folder = tempfile.mkdtemp(prefix="ceph_report_")
-        logger.info("Unpacking %r to temporary folder %r", path, folder)
+        logger.info("Unpacking %s to temporary folder %r", path, folder)
         subprocess.call(f"tar -zxvf {path} -C {folder} >/dev/null 2>&1", shell=True)
         return True, pathlib.Path(folder)
     elif not path.is_dir():
@@ -173,7 +160,9 @@ def parse_args(argv):
 
 def main(argv: List[str]):
     opts = parse_args(argv)
-    setup_logging(opts.log_level)
+    setup_logging(opts.log_level,
+                  log_config_file=str(pathlib.Path(__file__).parent / 'files/logging.json'),
+                  out_folder=None)
 
     logger.info("Generating report from %r to %r", opts.path, opts.out)
 

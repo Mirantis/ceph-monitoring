@@ -363,18 +363,18 @@ def show_ruleset_info(ceph: CephInfo) -> Table:
         disks_info = set()
 
         for osd in osds:
-            assert osd.storage_info
-            dsk = osd.storage_info.data.dev_info
-            storage_disks_types.add(dsk.tp.name)
-            if isinstance(osd.storage_info, FileStoreInfo):
-                journal_disks_types.add(osd.storage_info.journal.dev_info.tp.name)
-            else:
-                assert isinstance(osd.storage_info, BlueStoreInfo)
-                journal_disks_types.add(osd.storage_info.wal.dev_info.tp.name)
-                journal_disks_types.add(osd.storage_info.db.dev_info.tp.name)
+            if osd.storage_info:
+                dsk = osd.storage_info.data.dev_info
+                storage_disks_types.add(dsk.tp.name)
+                if isinstance(osd.storage_info, FileStoreInfo):
+                    journal_disks_types.add(osd.storage_info.journal.dev_info.tp.name)
+                else:
+                    assert isinstance(osd.storage_info, BlueStoreInfo)
+                    journal_disks_types.add(osd.storage_info.wal.dev_info.tp.name)
+                    journal_disks_types.add(osd.storage_info.db.dev_info.tp.name)
 
-            disks_sizes.add(dsk.logic_dev.size)
-            disks_info.add(f"{dsk.hw_model.vendor}::{dsk.hw_model.model}")
+                disks_sizes.add(dsk.logic_dev.size)
+                disks_info.add(f"{dsk.hw_model.vendor}::{dsk.hw_model.model}")
 
         row.data_disk_sizes = ", ".join(map(b2ssize, sorted(disks_sizes)))
         row.disk_types = ["data: " + ", ".join(storage_disks_types), "wal/db/j: " + ", ".join(journal_disks_types)]

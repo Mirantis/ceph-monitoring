@@ -160,6 +160,9 @@ def no_scrub_errors(config: CheckConfig, cluster: Cluster, ceph: CephInfo, repor
 def ssd_nvme_journals(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
     count = 0
     for osd in ceph.sorted_osds:
+        if osd.storage_info is None:
+            continue
+
         if isinstance(osd.storage_info, FileStoreInfo):
             j_classes = config.get('classes_for_j', ["sata_ssd", "sas-ssd", "nvme"])
             j_disk_type = osd.storage_info.journal.dev_info.tp.name
@@ -209,6 +212,8 @@ def max_journal_per_device(config: CheckConfig, cluster: Cluster, ceph: CephInfo
     duuid = lambda node, dev_name: f"{node.name}::{dev_name}"
 
     for osd in ceph.sorted_osds:
+        if osd.storage_info is None:
+            continue
         if isinstance(osd.storage_info, FileStoreInfo):
             host_dev_j_count[duuid(osd.host, osd.storage_info.journal.name)] += 1
         else:
@@ -397,35 +402,33 @@ def all_osds_in_root_the_same(config: CheckConfig, cluster: Cluster, ceph: CephI
 
         for osd_node in osds:
             osd = ceph.osds[osd_node.id]
-            assert osd.storage_info
-            sizes[osd.storage_info.data.partition_info.size] += 1
-            types[osd.storage_info.data.dev_info.tp] += 1
+            if osd.storage_info:
+                sizes[osd.storage_info.data.partition_info.size] += 1
+                types[osd.storage_info.data.dev_info.tp] += 1
 
         most_often_size = sorted((count, sz) for sz, count in sizes.items())[0][1]
         most_often_type = sorted((count, tp) for tp, count in types.items())[0][1]
 
         for osd_node in osds:
             osd = ceph.osds[osd_node.id]
-            assert osd.storage_info
+            if osd.storage_info:
+                sz = osd.storage_info.data.partition_info.size
 
-
-            sz = osd.storage_info.data.partition_info.size
-
-            if abs(sz - most_often_size) / max([sz, most_often_size, 1]) > max_size_diff:
-                report.add_extra_message(Severity.warning,
-                    f"size {b2ssize(sz)} different " +
-                    f"from most often one {b2ssize(most_often_size)} for root {rule.name}",
-                    osd_t(osd.id))
-                failed_size = True
-
-            if all_eq_types:
-                tp = osd.storage_info.data.dev_info.tp
-                if tp != most_often_type:
+                if abs(sz - most_often_size) / max([sz, most_often_size, 1]) > max_size_diff:
                     report.add_extra_message(Severity.warning,
-                        f"disk type {tp.name} different " +
-                        f"from most often one {most_often_type.name} for root {rule.name}",
+                        f"size {b2ssize(sz)} different " +
+                        f"from most often one {b2ssize(most_often_size)} for root {rule.name}",
                         osd_t(osd.id))
-                    failed_type = True
+                    failed_size = True
+
+                if all_eq_types:
+                    tp = osd.storage_info.data.dev_info.tp
+                    if tp != most_often_type:
+                        report.add_extra_message(Severity.warning,
+                            f"disk type {tp.name} different " +
+                            f"from most often one {most_often_type.name} for root {rule.name}",
+                            osd_t(osd.id))
+                        failed_type = True
 
     if all_eq_types:
         report.add_result(not failed_type, "Not all OSD's for same root has same drive types" if failed_type else "")
@@ -458,8 +461,9 @@ def osd_of_same_size_has_close_load(config: CheckConfig, cluster: Cluster, ceph:
     io_per_osd: Dict[str, Dict[int, List[Tuple[int, int]]]] = \
         collections.defaultdict(lambda: collections.defaultdict(list))
     for osd in ceph.osds.values():
-        for attr in ("reads", "writes", "read_b", "write_b"):
-            io_per_osd[attr][osd.total_space].append((getattr(osd.pg_stats, attr), osd.id))
+        if osd.total_space:
+            for attr in ("reads", "writes", "read_b", "write_b"):
+                io_per_osd[attr][osd.total_space].append((getattr(osd.pg_stats, attr), osd.id))
 
     sett = config.get("max_load_diff", {})
     min_ops = sett.get("min_mops", 1) * 1000000
@@ -506,6 +510,9 @@ def osd_has_enought_journal_db(config: CheckConfig, cluster: Cluster, ceph: Ceph
     db_part_min = config.get("db_part_min", 0.05)
 
     for osd in ceph.sorted_osds:
+        if osd.storage_info is None:
+            continue
+
         sinfo = osd.storage_info
         if isinstance(sinfo, FileStoreInfo):
             sync = float(osd.config['filestore_max_sync_interval']) if osd.run_info else 5

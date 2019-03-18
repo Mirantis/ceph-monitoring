@@ -1,0 +1,10 @@
+[Unit]
+Description=Mirantis ceph reporting service
+After=multi-user.target
+
+[Service]
+Environment=PYTHONUNBUFFERED=1
+Type=simple
+User=
+ExecStart=bash /opt/ceph_report/run.sh
+StandardOutput=null

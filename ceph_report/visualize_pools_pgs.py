@@ -164,7 +164,8 @@ def show_pools_info(ceph: CephInfo) -> Table:
             rule = ceph.crush.rules[pool.crush_rule]
             all_osd = list(ceph.crush.iter_osds_for_rule(rule.id))
             osds_for_rule[pool.crush_rule] = len(all_osd)
-            total_size_for_rule[pool.crush_rule] = sum(ceph.osds[osd.id].total_space for osd in all_osd)
+            total_size_for_rule[pool.crush_rule] = \
+                sum(ceph.osds[osd.id].total_space for osd in all_osd if ceph.osds[osd.id].total_space is not None)
 
         row.osds = osds_for_rule[pool.crush_rule]
         row.space = total_size_for_rule[pool.crush_rule]

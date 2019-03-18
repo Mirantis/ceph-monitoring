@@ -10,7 +10,7 @@ from typing import Dict, Any, List, Union, Tuple, Optional, Set
 import numpy
 import dataclasses
 
-from cephlib.crush import load_crushmap, Crush
+from cephlib.crush import load_crushmap_js, Crush
 from cephlib.storage import TypedStorage
 from cephlib.common import AttredDict
 
@@ -125,7 +125,8 @@ def load_PG_distribution(pools: Dict[str, Pool], pg_dump: Dict[str, Any]) -> Tup
             dict(sum_per_pool.items()), dict(sum_per_osd.items())
 
 
-version_rr = re.compile(r'ceph version\s+(?P<version>[^ ]*)\s+\((?P<hash>[^)]*?)\)')
+version_rr = re.compile(r'ceph version\s+(?P<version>\d+\.\d+\.\d+)(?P<extra>[^ ]*)\s+' +
+                        r'[([](?P<hash>[^)\]]*?)[)\]]')
 
 
 def parse_ceph_versions(data: str) -> Dict[str, CephVersion]:
@@ -140,7 +141,9 @@ def parse_ceph_versions(data: str) -> Dict[str, CephVersion]:
                 logger.error("Can't parse version %r from %r", json.loads(data_js)["version"], line)
                 raise StopError()
             major, minor, bugfix = map(int, rr.group("version").split("."))
-            vers[name.strip()] = CephVersion(major, minor, bugfix, rr.group("hash"))
+            vers[name.strip()] = CephVersion(major, minor, bugfix,
+                                             extra=rr.group("extra"),
+                                             commit_hash=rr.group("hash"))
     return vers
 
 
@@ -252,8 +255,21 @@ def load_pools(storage: TypedStorage, ver: CephVersions) -> Dict[int, Pool]:
             df_dict = df_dict['categories'][0]
 
         del df_dict['name']
-        id = df_dict.pop('id')
-        df_info[id] = PoolDF(**df_dict)
+
+        # need 'ints' for older ceph version
+        id = int(df_dict.pop('id'))
+        df_info[id] = PoolDF(size_bytes=int(df_dict['size_bytes']),
+                             size_kb=int(df_dict['size_kb']),
+                             num_objects=int(df_dict['num_objects']),
+                             num_object_clones=int(df_dict['num_object_clones']),
+                             num_object_copies=int(df_dict['num_object_copies']),
+                             num_objects_missing_on_primary=int(df_dict['num_objects_missing_on_primary']),
+                             num_objects_unfound=int(df_dict['num_objects_unfound']),
+                             num_objects_degraded=int(df_dict['num_objects_degraded']),
+                             read_ops=int(df_dict['read_ops']),
+                             read_bytes=int(df_dict['read_bytes']),
+                             write_ops=int(df_dict['write_ops']),
+                             write_bytes=int(df_dict['write_bytes']))
 
     pools: Dict[int, Pool] = {}
     for info in storage.json.master.osd_dump['pools']:
@@ -338,7 +354,7 @@ class CephLoader:
         osd_pool_pg_2d, sum_per_pool, sum_per_osd = load_PG_distribution(name2pool, pg_dump)
 
         logger.debug("Load crushmap")
-        crush = load_crushmap(content=self.storage.txt.master.crushmap)
+        crush = load_crushmap_js(crush=self.storage.json.master.osd_crush_dump)
 
         if pg_dump:
             logger.debug("Load pgdump")
@@ -403,9 +419,12 @@ class CephLoader:
                               vm_rss=mem2bytes(pinfo["mem"]["VmRSS"]),
                               vm_size=mem2bytes(pinfo["mem"]["VmSize"]))
 
-    def load_osd_devices(self, osd_id: int, host: Host) -> Union[FileStoreInfo, BlueStoreInfo]:
+    def load_osd_devices(self, osd_id: int, host: Host) -> Union[None, FileStoreInfo, BlueStoreInfo]:
         osd_stor_node = self.storage.json.osd[str(osd_id)]
         osd_disks_info = osd_stor_node.devs_cfg
+
+        if osd_disks_info == {}:
+            return None
 
         def get_ceph_dev_info(devpath: str, partpath: str) -> CephDevInfo:
             dev_name = devpath.split("/")[-1]
@@ -522,6 +541,9 @@ class CephLoader:
             else:
                 free_perc = int((free_space * 100.0) / (free_space + used_space) + 0.5)
 
+            expected_weights = None if storage_info is None else (storage_info.data.dev_info.size / (1024 ** 4))
+            total_space = None if storage_info is None else storage_info.data.dev_info.size
+
             osds[osd_id] = CephOSD(id=osd_id,
                                    status=status,
                                    config=config,
@@ -536,9 +558,9 @@ class CephLoader:
                                    host=host,
                                    storage_info=storage_info,
                                    run_info=self.load_osd_procinfo(osd_id) if status != OSDStatus.down else None,
-                                   expected_weights=storage_info.data.dev_info.size / (1024 ** 4),
+                                   expected_weights=expected_weights,
                                    crush_rules_weights=crush_rules_weights,
-                                   total_space=storage_info.data.dev_info.size,
+                                   total_space=total_space,
                                    pgs=osd_pgs,
                                    pg_stats=pg_stats,
                                    d_pg_stats=None,

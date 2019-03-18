@@ -489,10 +489,11 @@ class CephVersion:
     major: int
     minor: int
     bugfix: int
+    extra: str
     commit_hash: str
 
     def __str__(self) -> str:
-        return f"{self.major}.{self.minor}.{self.bugfix}  [{self.commit_hash[:8]}]"
+        return f"{self.major}.{self.minor}.{self.bugfix}{self.extra}  [{self.commit_hash[:8]}]"
 
     @property
     def version(self) -> CephVersions:
@@ -635,7 +636,6 @@ class PGStatSum:
     num_flush_mode_high: int
     num_flush_mode_low: int
     num_keys_recovered: int
-    num_legacy_snapsets: int
     num_object_clones: int
     num_object_copies: int
     num_objects: int
@@ -657,6 +657,7 @@ class PGStatSum:
     num_whiteouts: int
     num_write: int
     num_write_kb: int
+    num_legacy_snapsets: Optional[int] = None
     num_large_omap_objects: Optional[int] = None
 
 
@@ -807,10 +808,10 @@ class CephOSD:
     free_perc: Optional[int]
     used_space: int
     free_space: int
-    total_space: int
+    total_space: Optional[int]
 
     pgs: Optional[List[PG]]
-    expected_weights: float
+    expected_weights: Optional[float]
     crush_rules_weights: Dict[int, float]
 
     run_info: Optional[OSDProcessInfo]

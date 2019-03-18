@@ -1296,6 +1296,7 @@ def parse_args(argv: List[str]) -> Any:
     collect.add_argument("--cmd-timeout", default=60, type=int, help="Cmd's run timeout")
 
     upload = subparsers.add_parser('upload', help='Upload report to server')
+    upload.add_argument("--base-folder", default=".", help="Base folder for all paths")
     upload.add_argument('--url', required=True, help="Url to upload to")
     upload.add_argument('--key', default=get_file_path("enc_key.pub"), help="Server open key for data encryption")
     upload.add_argument('--cert', default=get_file_path("mira_report_storage.crt"), help="Server cert file")

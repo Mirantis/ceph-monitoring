@@ -46,7 +46,9 @@ def group_osds(ceph: CephInfo) -> List[List[OSDInfo]]:
     objs = []
 
     for osd in ceph.sorted_osds:
-        assert osd.storage_info
+        if osd.storage_info is None:
+            continue
+
         data_dev_path = osd.storage_info.data.path
         jinfo = osd.storage_info.journal if isinstance(osd.storage_info, FileStoreInfo) else osd.storage_info.wal
 
@@ -328,9 +330,12 @@ def show_osd_info(ceph: CephInfo) -> html.HTMLTable:
         row.journal_or_wal_size = (size_s if osd_info.journal_or_wal_size >= min_size else html.fail(size_s)), \
             osd_info.journal_or_wal_size
 
+        if osd.storage_info is None:
+            row.journal_on_file = "no"
+
         if isinstance(osd.storage_info, FileStoreInfo):
             jonfile = osd.storage_info.journal.partition_name == osd.storage_info.data.partition_name
-            row.journal_on_file = (html.fail("yes"), "yes") if jonfile else "no"
+            row.journal_on_file = jonfile
 
         if isinstance(osd.storage_info, BlueStoreInfo):
             if osd.storage_info.db.dev_info.size is not None:
@@ -421,7 +426,9 @@ def show_osd_perf_info(ceph: CephInfo) -> html.HTMLTable:
 
     table = Tbl()
     for osd in ceph.sorted_osds:
-        assert osd.storage_info is not None
+        if osd.storage_info is None:
+            continue
+
         row = table.next_row()
 
         row.osd = osd_link(osd.id).link, osd.id

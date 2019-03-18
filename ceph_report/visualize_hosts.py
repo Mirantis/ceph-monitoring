@@ -291,7 +291,8 @@ def find_stor_roles(host: Host, ceph: CephInfo) -> Tuple[Dict[str, Dict[str, Set
 
     for osd in ceph.osds.values():
         if osd.host is host:
-            assert osd.storage_info
+            if not osd.storage_info:
+                continue
             stor_roles[osd.storage_info.data.partition_name]['data'].add(osd.id)
             stor_roles[osd.storage_info.data.name]['data'].add(osd.id)
 
