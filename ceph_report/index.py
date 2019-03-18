@@ -8,13 +8,8 @@ import argparse
 from typing import Iterator, Tuple, List
 
 from .visualize import setup_logging, make_report, prepare_path
+from .web_storage import fname_rr
 
-
-fname_re = r"(?:ceph_report\.)?(?P<name>.*?)" + \
-           r"[._](?P<datetime>20[12]\d_[A-Za-z]{3}_\d{1,2}\.\d\d_\d\d)" + \
-           r"\.(?P<ext>tar\.gz|html)$"
-
-fname_rr = re.compile(fname_re)
 
 def iter_fname_re(path: pathlib.Path, ext: str) -> Iterator[Tuple[str, datetime.datetime, pathlib.Path]]:
     for file in path.iterdir():

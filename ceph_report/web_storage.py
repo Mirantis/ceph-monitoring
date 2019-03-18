@@ -5,12 +5,18 @@ import ssl
 import os.path
 import argparse
 from typing import List
-from .index import fname_rr
 
 from aiohttp import web, BasicAuth
 
 
 MAX_FILE_FIZE = 1 << 30
+
+
+fname_re = r"(?:ceph_report\.)?(?P<name>.*?)" + \
+           r"[._](?P<datetime>20[12]\d_[A-Za-z]{3}_\d{1,2}\.\d\d_\d\d)" + \
+           r"\.(?P<ext>tar\.gz|html)$"
+
+fname_rr = re.compile(fname_re)
 
 
 def basic_auth_middleware(user: str, password: str):
