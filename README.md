@@ -32,7 +32,7 @@ How to collect data:
 * In simplest case collect cluster info can be done with (see below for MCP example):
   Please take into account that all file paths must be absolute.
 
-    `bash ceph_report.sh --log-level DEBUG collect --cluster CLUSTER_NAME ADDITIONAL_OPTIONS`
+    `bash ceph_report.sh collect --log-level DEBUG --cluster CLUSTER_NAME ADDITIONAL_OPTIONS`
 
 Additional options (in most cases you will need them all):
 - For passing inventory `--inventory INV_FILE`
@@ -41,7 +41,7 @@ Additional options (in most cases you will need them all):
 
 For MCP in most cases you need to run it as
 
-    bash ceph_report.sh --log-level DEBUG collect --cluster CLUSTER_NAME --inventory INV_FILE_PATH --ceph-master ANY_CEPH_NODE
+    bash ceph_report.sh collect  --log-level DEBUG --cluster CLUSTER_NAME --inventory INV_FILE_PATH --ceph-master ANY_CEPH_NODE
 
 * See `bash ceph_report.sh --help` for usage, if needed
 * Follow the logs, in case of error it should give you a hint what's broken, or what package is missing
@@ -54,7 +54,7 @@ For MCP in most cases you need to run it as
 
 How to upload file to mirantis report center:
 
-    bash ceph_report.sh --log-level DEBUG upload --url MIRANTIS_SERVER_URL --http-creds HTTP_USER:HTTP_PASSWD REPORT_FILE_PATH
+    bash ceph_report.sh upload --log-level DEBUG --url MIRANTIS_SERVER_URL --http-creds HTTP_USER:HTTP_PASSWD REPORT_FILE_PATH
 
 
 How to visualize result:

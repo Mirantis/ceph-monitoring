@@ -1,4 +1,4 @@
-.PHONY: mypy pylint pylint_e prepare archive
+.PHONY: mypy pylint pylint_e prepare archive archive_local
 
 ALL_FILES=$(shell find ceph_report/ -type f -name '*.py')
 # ALL_FILES=ceph_report/collect_info.py
@@ -18,3 +18,6 @@ pylint_e:
 
 archive:
 		bash scripts/makearch.sh binary/ceph_report.sh
+
+archive_local:
+		bash -x scripts/makearch.sh --local binary/ceph_report.sh

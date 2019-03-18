@@ -1261,11 +1261,6 @@ def check_and_prepare_paths(opts: Any) -> Tuple[Optional[str], Optional[str], Op
 def parse_args(argv: List[str]) -> Any:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-                        help="Console log level, see logging.json for defaults")
-    parser.add_argument("--persistent-log", action="store_true",
-                        help="Log to /var/log/ceph_report_collector.log as well")
-
     subparsers = parser.add_subparsers(dest='subparser_name')
 
     collect = subparsers.add_parser('collect', help='Collect data')
@@ -1307,6 +1302,12 @@ def parse_args(argv: List[str]) -> Any:
     upload.add_argument('--upload-script-path', default=get_file_path("upload.sh"), help="upload.sh path")
     upload.add_argument('--http-creds', required=True, help="Http user:password, as provided by mirantis support")
     upload.add_argument('report', help="path to report archive")
+
+    for p in (upload, collect):
+        p.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                       help="Console log level, see logging.json for defaults")
+        p.add_argument("--persistent-log", action="store_true",
+                       help="Log to /var/log/ceph_report_collector.log as well")
 
     return parser.parse_args(argv[1:])
 
