@@ -146,9 +146,9 @@ def main(argv: List[str]):
     app = web.Application(middlewares=[],
                           client_max_size=MAX_FILE_FIZE)
     app.add_routes([web.put('/archives', functools.partial(handle_put, opts.storage_folder))])
-    app.add_routes([web.put('/list', functools.partial(handle_list, opts.storage_folder))])
-    app.add_routes([web.put('/get', functools.partial(handle_get_file, opts.storage_folder))])
-    app.add_routes([web.put('/del', functools.partial(handle_del_file, opts.storage_folder))])
+    app.add_routes([web.get('/list', functools.partial(handle_list, opts.storage_folder))])
+    app.add_routes([web.post('/get', functools.partial(handle_get_file, opts.storage_folder))])
+    app.add_routes([web.post('/del', functools.partial(handle_del_file, opts.storage_folder))])
 
     host, port = opts.addr.split(":")
 
