@@ -29,7 +29,7 @@ def download(func):
     return func
 
 
-def basic_auth_middleware(pwd_db: Dict[str: Dict[str, str]]):
+def basic_auth_middleware(pwd_db: Dict[str, Dict[str, str]]):
     @web.middleware
     async def basic_auth(request, handler):
         basic_auth = request.headers.get('Authorization')
@@ -93,6 +93,7 @@ def parse_args(argv: List[str]):
     p.add_argument("--cert", required=True, help="cert file path")
     p.add_argument("--key", required=True, help="key file path")
     p.add_argument("--password-db", required=True, help="Json file with password database")
+    p.add_argument("--storage-folder", required=True, help="Path to store archives")
     p.add_argument("addr", default="0.0.0.0:80", help="Address to listen on")
     return p.parse_args(argv[1:])
 
