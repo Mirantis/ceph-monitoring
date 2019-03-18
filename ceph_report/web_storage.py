@@ -5,6 +5,7 @@ import json
 import os.path
 import argparse
 import functools
+import time
 from typing import List, Dict
 
 from aiohttp import web, BasicAuth
@@ -44,15 +45,19 @@ def basic_auth_middleware(pwd_db: Dict[str, Dict[str, str]]):
     return basic_auth
 
 
+def allowed_file_name(data: str) -> bool:
+    return re.match(r"[-a-zA-Z0-9_.]+$", data) is not None
+
+
 @upload
-async def handle_put(target_dir: str, request):
+async def handle_put(target_dir: str, request: web.Request):
     target_name = request.headers.get('Arch-Name')
     enc_passwd = request.headers.get('Enc-Password')
 
     if request.content_length is None or target_name is None or enc_passwd is None :
         return web.HTTPBadRequest(reason="Some required header(s) missing (Arch-Name/Enc-Password/Content-Length)")
 
-    if not re.match(r"[-a-zA-Z0-9_.]+$", target_name):
+    if not allowed_file_name(target_name):
         return web.HTTPBadRequest(reason="Incorrect file name: {}".format(target_name))
 
     if not target_name.endswith('.enc'):
@@ -65,7 +70,10 @@ async def handle_put(target_dir: str, request):
         return web.HTTPBadRequest(reason="File too large, max {} size allowed".format(MAX_FILE_FIZE))
 
     target_path = os.path.join(target_dir, target_name)
-    if os.path.exists(target_path):
+    key_file = target_path + ".key"
+    meta_file = target_path + ".meta"
+
+    if any(map(os.path.exists, [target_path, key_file, meta_file])):
         return web.HTTPBadRequest(reason="File exists")
 
     print("Receiving {} bytes from {} to file {}".format(request.content_length, request.remote, target_name))
@@ -81,11 +89,40 @@ async def handle_put(target_dir: str, request):
         with open(target_path + ".key", "wb") as fd:
             fd.write(enc_passwd.encode("utf8"))
 
+        with open(target_path + ".meta", "w") as fd:
+            fd.write(json.dumps({'upload_time': time.time(), 'src_addr': request.remote}))
+
     except:
         os.unlink(target_path)
         raise
 
     return web.Response(text="Saved ")
+
+
+@download
+async def handle_list(target_dir: str, request: web.Request):
+    return web.Response(text=json.dumps(os.listdir(target_dir)), content_type="text/json")
+
+
+@download
+async def handle_get_file(target_dir: str, request: web.Request):
+    target_name = (await request.read()).decode("utf8")
+
+    if not allowed_file_name(target_name):
+        return web.HTTPBadRequest(reason="Incorrect file name: {}".format(target_name))
+
+    return web.FileResponse(os.path.join(target_dir, target_name))
+
+
+@download
+async def handle_del_file(target_dir: str, request: web.Request):
+    target_name = (await request.read()).decode("utf8")
+
+    if not allowed_file_name(target_name):
+        return web.HTTPBadRequest(reason="Incorrect file name: {}".format(target_name))
+
+    os.unlink(os.path.join(target_dir, target_name))
+    return web.Response(text="removed")
 
 
 def parse_args(argv: List[str]):
@@ -102,11 +139,16 @@ def main(argv: List[str]):
     opts = parse_args(argv)
     ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     ssl_context.load_cert_chain(opts.cert, opts.key)
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
 
     auth = basic_auth_middleware(json.load(open(opts.password_db)))
     app = web.Application(middlewares=[],
                           client_max_size=MAX_FILE_FIZE)
     app.add_routes([web.put('/archives', functools.partial(handle_put, opts.storage_folder))])
+    app.add_routes([web.put('/list', functools.partial(handle_list, opts.storage_folder))])
+    app.add_routes([web.put('/get', functools.partial(handle_get_file, opts.storage_folder))])
+    app.add_routes([web.put('/del', functools.partial(handle_del_file, opts.storage_folder))])
 
     host, port = opts.addr.split(":")
 
