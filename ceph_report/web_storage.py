@@ -1,26 +1,24 @@
 import re
-import shutil
 import sys
+
+import requests
 import ssl
 import json
 import time
+import shutil
 import os.path
 import hashlib
 import argparse
 import functools
-from typing import List, Dict, Tuple, Optional
+from urllib.parse import urljoin
+from typing import List, Dict, Tuple, BinaryIO
 
-from aiohttp import web, BasicAuth
+from aiohttp import web, BasicAuth, ClientSession
+from .utils import parse_file_name, FileType
 
-MAX_FILE_FIZE = 1 << 30
+
+MAX_FILE_SIZE = 1 << 30
 MAX_PASSWORD_LEN = 1 << 10
-
-
-fname_re = r"(?:ceph_report\.)?(?P<name>.*?)" + \
-           r"[._](?P<datetime>20[12]\d_[A-Za-z]{3}_\d{1,2}\.\d\d_\d\d)" + \
-           r"\.(?P<ext>tar\.gz|html)$"
-
-fname_rr = re.compile(fname_re)
 
 
 def upload(func):
@@ -75,17 +73,16 @@ async def handle_put(target_dir: str, min_free_space: int, request: web.Request)
     if request.content_length is None or target_name is None or enc_passwd is None :
         return web.HTTPBadRequest(reason="Some required header(s) missing (Arch-Name/Enc-Password/Content-Length)")
 
+    # explicit redundancy with parse_file_name to be sure that no malicious file would ever pass into
     if not allowed_file_name(target_name):
         return web.HTTPBadRequest(reason=f"Incorrect file name: {target_name}")
 
-    if not target_name.endswith('.enc'):
+    finfo = parse_file_name(target_name)
+    if finfo is None or finfo.ftype != FileType.enc or finfo.ref_ftype != FileType.report_arch:
         return web.HTTPBadRequest(reason=f"Incorrect file name: {target_name}")
 
-    if not fname_rr.match(target_name[:-len('.enc')]):
-        return web.HTTPBadRequest(reason=f"Incorrect file name: {target_name}")
-
-    if request.content_length > MAX_FILE_FIZE:
-        return web.HTTPBadRequest(reason=f"File too large, max {MAX_FILE_FIZE} size allowed")
+    if request.content_length > MAX_FILE_SIZE:
+        return web.HTTPBadRequest(reason=f"File too large, max {MAX_FILE_SIZE} size allowed")
 
     if len(enc_passwd) > MAX_PASSWORD_LEN:
         return web.HTTPBadRequest(reason=f"Password too large, max {MAX_PASSWORD_LEN} size allowed")
@@ -93,7 +90,7 @@ async def handle_put(target_dir: str, min_free_space: int, request: web.Request)
     if shutil.disk_usage("/").free - request.content_length - len(enc_passwd) < min_free_space:
         return web.HTTPBadRequest(reason="No space left on device")
 
-    target_path = os.path.join(target_dir, target_name)
+    target_path = os.path.join(target_dir, finfo.ref_name)
     key_file = target_path + ".key"
     meta_file = target_path + ".meta"
 
@@ -110,10 +107,10 @@ async def handle_put(target_dir: str, min_free_space: int, request: web.Request)
                     break
                 fd.write(data)
 
-        with open(target_path + ".key", "wb") as fd:
+        with open(key_file, "wb") as fd:
             fd.write(enc_passwd.encode("utf8"))
 
-        with open(target_path + ".meta", "w") as fd:
+        with open(meta_file, "w") as fd:
             fd.write(json.dumps({'upload_time': time.time(), 'src_addr': request.remote}))
 
     except:
@@ -125,7 +122,7 @@ async def handle_put(target_dir: str, min_free_space: int, request: web.Request)
 
 @download
 async def handle_list(target_dir: str, request: web.Request):
-    return web.Response(text=json.dumps(os.listdir(target_dir)), content_type="text/json")
+    return web.Response(text=json.dumps(os.listdir(target_dir)), content_type="application/json")
 
 
 @download
@@ -147,6 +144,64 @@ async def handle_del(target_dir: str, request: web.Request):
 
     os.unlink(os.path.join(target_dir, target_name))
     return web.Response(text="removed")
+
+
+class API:
+    def __init__(self, src_url: str, http_user: str, http_password: str) -> None:
+        assert ' ' not in src_url
+
+        self.auth = BasicAuth(http_user, http_password)
+        self.list_url = urljoin(src_url, "list")
+        self.get_url = urljoin(src_url, "get")
+        self.del_url = urljoin(src_url, "del")
+
+    async def list(self) -> List[str]:
+        async with ClientSession() as client:
+            async with client.get(self.list_url) as resp:
+                assert resp.status == 200
+                return await resp.json()
+
+    async def save_to(self, name: str, fd: BinaryIO):
+        async with ClientSession() as client:
+            async with client.post(self.get_url, data=name.encode("utf8")) as resp:
+                assert resp.status == 200
+                while True:
+                    data = await resp.content.read(2 << 20)
+                    if not data:
+                        break
+                    fd.write(data)
+
+    async def delete(self, name: str):
+        async with ClientSession() as client:
+            async with client.post(self.get_url, data=name.encode("utf8")) as resp:
+                assert resp.status == 200
+
+
+class SyncApi:
+    def __init__(self, src_url: str, http_user: str, http_password: str) -> None:
+        assert ' ' not in src_url
+
+        self.http_user = http_user
+        self.http_password = http_password
+        self.auth = BasicAuth(http_user, http_password)
+        self.list_url = urljoin(src_url, "list")
+        self.get_url = urljoin(src_url, "get")
+        self.del_url = urljoin(src_url, "del")
+
+    def list(self) -> List[str]:
+        resp = requests.get(self.list_url, auth=(self.http_user, self.http_password))
+        assert resp.status_code == 200
+        return resp.json()
+
+    def save_to(self, name: str, fd: BinaryIO):
+        resp = requests.post(self.get_url, auth=(self.http_user, self.http_password), data=name)
+        assert resp.status_code == 200
+        for chunk in resp.iter_content(chunk_size=2 << 20):
+            fd.write(chunk)
+
+    def delete(self, name: str):
+        resp = requests.post(self.del_url, auth=(self.http_user, self.http_password), data=name)
+        assert resp.status_code == 200
 
 
 def parse_args(argv: List[str]):
@@ -186,11 +241,11 @@ def main(argv: List[str]):
 
         auth = basic_auth_middleware(json.load(open(opts.password_db)))
         app = web.Application(middlewares=[auth],
-                              client_max_size=MAX_FILE_FIZE)
-        app.add_routes([web.put('/archives', functools.partial(handle_put, opts.storage_folder, opts.min_free_space))])
-        app.add_routes([web.get('/list', functools.partial(handle_list, opts.storage_folder))])
-        app.add_routes([web.post('/get', functools.partial(handle_get, opts.storage_folder))])
-        app.add_routes([web.post('/del', functools.partial(handle_del, opts.storage_folder))])
+                              client_max_size=MAX_FILE_SIZE)
+        app.add_routes([web.put('/archives', functools.partial(handle_put, opts.storage_folder, opts.min_free_space)),
+                        web.get('/list', functools.partial(handle_list, opts.storage_folder)),
+                        web.post('/get', functools.partial(handle_get, opts.storage_folder)),
+                        web.post('/del', functools.partial(handle_del, opts.storage_folder))])
 
         host, port = opts.addr.split(":")
 

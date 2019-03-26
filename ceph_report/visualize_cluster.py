@@ -1,4 +1,5 @@
 import time
+import logging
 import datetime
 import collections
 from pathlib import Path
@@ -16,6 +17,9 @@ from .checks import run_all_checks, CheckMessage
 from .report import Report
 from .obj_links import err_link, mon_link, pool_link
 from .table import Table, count, bytes_sz, ident, idents_list, exact_count, to_str
+
+
+logger = logging.getLogger("cephlib.checks")
 
 
 @tab("Status")
@@ -109,6 +113,7 @@ def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report):
             table.add_cells("Total affected", str(len(all_services)), "")
 
         report.add_block(err_link(reporter_id).id, None, str(table))
+    report.issues.update(err_per_test)
 
 
 @tab("Current IO Activity")
@@ -323,6 +328,10 @@ def show_ruleset_info(ceph: CephInfo) -> Table:
     cluster_objects = sum(pool.df.num_objects for pool in ceph.pools.values())
 
     for rule in ceph.crush.rules.values():
+        if rule.id not in ceph.osds4rule:
+            logger.warning("Skipping visualization of rule %s, as it hs no osd in it", rule.name)
+            continue
+
         row = table.next_row()
         row.rule = rule.name
         row.id = rule.id

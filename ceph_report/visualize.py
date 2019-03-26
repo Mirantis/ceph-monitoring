@@ -1,11 +1,9 @@
 import io
-import pathlib
 import sys
-import json
 import pstats
 import shutil
 import inspect
-import logging
+import pathlib
 import tempfile
 import cProfile
 import argparse
@@ -42,7 +40,7 @@ from .visualize_host_load import show_host_io_load_in_color, show_host_network_l
 from .visualize_osds import show_osd_state, show_osd_info, show_osd_perf_info, show_osd_pool_pg_distribution, \
                             show_osd_pool_agg_pg_distribution, show_osd_proc_info, show_osd_proc_info_agg
 from .plot_data import plot_crush_rules, show_osd_used_space_histo
-from .collect_info import setup_logging
+from .collect_info import setup_logging, get_file_path
 
 logger = logging.getLogger('report')
 
@@ -60,85 +58,79 @@ def prepare_path(path: pathlib.Path) -> Tuple[bool, pathlib.Path]:
         return False, path
 
 
-def make_report(name: str,
-                d1_path: pathlib.Path,
-                d2_path: pathlib.Path = None,
-                plot: bool = True,
-                pretty_html: bool = True,
-                embed: bool = True,
-                encrypt_passwd: str = None) -> str:
-        logger.info("Loading collected data info into RAM")
-        if d2_path:
-            cluster, ceph = load_all(TypedStorage(make_storage(str(d1_path), existing=True)))
-            cluster2, ceph2 = load_all(TypedStorage(make_storage(str(d2_path), existing=True)))
-            fill_usage(cluster, cluster2, ceph, ceph2)
-            cluster.has_second_report = True
-        else:
-            cluster, ceph = load_all(TypedStorage(make_storage(str(d1_path), existing=True)))
+def make_report(name: str, d1_path: pathlib.Path, d2_path: pathlib.Path = None, plot: bool = True) -> Report:
+    logger.info("Loading collected data info into RAM")
+    if d2_path:
+        cluster, ceph = load_all(TypedStorage(make_storage(str(d1_path), existing=True)))
+        cluster2, ceph2 = load_all(TypedStorage(make_storage(str(d2_path), existing=True)))
+        fill_usage(cluster, cluster2, ceph, ceph2)
+        cluster.has_second_report = True
+    else:
+        cluster, ceph = load_all(TypedStorage(make_storage(str(d1_path), existing=True)))
 
-        fill_cluster_nets_roles(cluster, ceph)
+    fill_cluster_nets_roles(cluster, ceph)
 
-        logger.info("Done")
+    logger.info("Done")
 
-        report = Report(name, "index.html")
+    report = Report(name, "index.html")
 
-        cluster_reporters = [
-            show_cluster_summary,
-            show_issues_table,
-            show_primary_settings,
-            show_pools_info,
-            show_pools_lifetime_load,
-            show_pools_curr_load,
-            show_ruleset_info,
-            show_io_status,
-            show_hosts_config,
-            show_hosts_status,
-            show_hosts_pg_info,
-            show_mons_info,
-            show_osd_state,
-            show_osd_info,
-            show_osd_proc_info,
-            show_osd_proc_info_agg,
-            show_osd_perf_info,
-            show_pg_state,
-            show_cluster_err_warn_summary,
-            show_cluster_err_warn,
-            (show_osd_pool_agg_pg_distribution if len(ceph.osds) > 20 else show_osd_pool_pg_distribution),
-            show_host_io_load_in_color,
-            show_host_network_load_in_color,
-            show_whole_cluster_nets,
-            show_osd_used_space_histo,
-            # show_osd_pg_histo,
-            show_pg_size_kde,
-            plot_crush_rules
-        ]
+    cluster_reporters = [
+        show_cluster_summary,
+        show_issues_table,
+        show_primary_settings,
+        show_pools_info,
+        show_pools_lifetime_load,
+        show_pools_curr_load,
+        show_ruleset_info,
+        show_io_status,
+        show_hosts_config,
+        show_hosts_status,
+        show_hosts_pg_info,
+        show_mons_info,
+        show_osd_state,
+        show_osd_info,
+        show_osd_proc_info,
+        show_osd_proc_info_agg,
+        show_osd_perf_info,
+        show_pg_state,
+        show_cluster_err_warn_summary,
+        show_cluster_err_warn,
+        (show_osd_pool_agg_pg_distribution if len(ceph.osds) > 20 else show_osd_pool_pg_distribution),
+        show_host_io_load_in_color,
+        show_host_network_load_in_color,
+        show_whole_cluster_nets,
+        show_osd_used_space_histo,
+        # show_osd_pg_histo,
+        show_pg_size_kde,
+        plot_crush_rules
+    ]
 
-        params = {"ceph": ceph, "cluster": cluster, "report": report, "uptime": not cluster.has_second_report}
+    params = {"ceph": ceph, "cluster": cluster, "report": report, "uptime": not cluster.has_second_report}
 
-        for reporter in cluster_reporters:
-            if getattr(reporter, "perf_info_required", False) and not cluster.has_second_report:
-                continue
-            if getattr(reporter, 'plot', False) and not plot:
-                continue
+    for reporter in cluster_reporters:
+        if getattr(reporter, "perf_info_required", False) and not cluster.has_second_report:
+            continue
+        if getattr(reporter, 'plot', False) and not plot:
+            continue
 
-            sig = inspect.signature(reporter)
-            curr_params = {name: params[name] for name in sig.parameters}
-            new_block = reporter(**curr_params)
+        sig = inspect.signature(reporter)
+        curr_params = {name: params[name] for name in sig.parameters}
+        new_block = reporter(**curr_params)
 
-            if new_block:
-                assert 'report' not in sig.parameters
-                rname = reporter.__name__.replace("show_", "")
-                if isinstance(new_block, table.Table):
-                    html_id = reporter.html_id if hasattr(reporter, 'html_id') else None
-                    new_block_html = new_block.html(html_id)
-                else:
-                    new_block_html = new_block
-                report.add_block(rname, reporter.report_name, new_block_html)
+        if new_block:
+            assert 'report' not in sig.parameters
+            rname = reporter.__name__.replace("show_", "")
+            if isinstance(new_block, table.Table):
+                html_id = reporter.html_id if hasattr(reporter, 'html_id') else None
+                new_block_html = new_block.html(html_id)
+            else:
+                new_block_html = new_block
+            report.add_block(rname, reporter.report_name, new_block_html)
 
-        for _, host in sorted(cluster.hosts.items()):
-            report.add_block(host_link(host.name).id, None, host_info(host, ceph))
+    for _, host in sorted(cluster.hosts.items()):
+        report.add_block(host_link(host.name).id, None, host_info(host, ceph))
 
-        return report.render(pretty_html, embed=embed, encrypt=encrypt_passwd)
+    return report
 
 
 def parse_args(argv):
@@ -161,7 +153,7 @@ def parse_args(argv):
 def main(argv: List[str]):
     opts = parse_args(argv)
     setup_logging(opts.log_level,
-                  log_config_file=str(pathlib.Path(__file__).parent / 'files/logging.json'),
+                  log_config_file=get_file_path('logging.json'),
                   out_folder=None)
 
     logger.info("Generating report from %r to %r", opts.path, opts.out)
@@ -188,13 +180,10 @@ def main(argv: List[str]):
         out_p.mkdir(parents=True, exist_ok=True)
 
     try:
-        report = make_report(name=opts.name, d1_path=d1_path, d2_path=d2_path,
-                             plot=opts.plot,
-                             encrypt_passwd=opts.encrypt,
-                             embed=opts.embed,
-                             pretty_html=opts.pretty_html)
-
-        index_path.open("w").write(report)
+        report = make_report(name=opts.name, d1_path=d1_path, d2_path=d2_path, plot=opts.plot)
+        index_path.open("w").write(report.render(pretty_html=opts.pretty_html,
+                                                 embed=opts.embed,
+                                                 encrypt=opts.encrypt))
         logger.info("Report successfully stored to %r", str(index_path))
     except StopError:
         pass

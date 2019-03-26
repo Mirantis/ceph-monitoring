@@ -485,9 +485,14 @@ class CephLoader:
 
         for osd_data in self.storage.json.master.osd_dump['osds']:
             osd_id = osd_data['osd']
-            osd_df_data = osd_df_map[osd_id]
-            used_space = osd_df_data['kb_used'] * 1024
-            free_space = osd_df_data['kb_avail'] * 1024
+
+            if osd_id not in osd_df_map:
+                logger.warning("Osd %s has no disk space information - ignoring it", osd_id)
+                continue
+
+            used_space = osd_df_map[osd_id]['kb_used'] * 1024
+            free_space = osd_df_map[osd_id]['kb_avail'] * 1024
+
             cluster_ip = osd_data['cluster_addr'].split(":", 1)[0]
 
             try:

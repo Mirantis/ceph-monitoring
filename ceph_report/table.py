@@ -213,6 +213,10 @@ class Table:
     def add_row(self, *vals: Any):
         self.rows.append(dict(zip(self.all_names, vals)))
 
+    def add_named_row(self, **vals: Any):
+        assert sorted(self.all_names) == sorted(vals.keys()), f"{sorted(self.all_names)}, {sorted(vals.keys())}"
+        self.rows.append(vals)
+
     def html(self, id=None, **kwargs) -> HTMLTable:
         headers, header_names, types = self.all_headers()
 

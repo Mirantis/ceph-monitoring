@@ -20,7 +20,7 @@ read -r USER_PASSWD
 
 KEY=$(openssl rand -hex 64)
 echo "${KEY}" | openssl enc -aes-256-cbc -salt -in "${ARCH}" -out "${ARCH_ENC}" -pass stdin
-ENC_KEY=$(echo "${KEY}" | openssl rsautl -encrypt -inkey "${PUB_KEY}" -pubin  | base64 -w 0)
+ENC_KEY=$(echo "${KEY}" | openssl rsautl -encrypt -inkey "${PUB_KEY}" -pubin  | base64 --wrap=0)
 curl --silent --show-error --fail -k --cacert "${CERT}" \
      -u "${USER_PASSWD}" \
      --header "Enc-Password: ${ENC_KEY}" \

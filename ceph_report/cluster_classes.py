@@ -806,8 +806,8 @@ class CephOSD:
     class_name: Optional[str]
 
     free_perc: Optional[int]
-    used_space: int
-    free_space: int
+    used_space: Optional[int]
+    free_space: Optional[int]
     total_space: Optional[int]
 
     pgs: Optional[List[PG]]

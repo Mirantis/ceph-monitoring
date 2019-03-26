@@ -113,6 +113,10 @@ def fail(text: str) -> TagProxy:
     return rtag.font(text, color="red")
 
 
+def href(text: str, link: str) -> str:
+    return f'<a href="{link}">{text}</a>'
+
+
 class TableAlign(Enum):
     center = 0
     left_right = 1

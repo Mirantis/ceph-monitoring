@@ -1235,8 +1235,8 @@ def check_and_prepare_paths(opts: Any) -> Tuple[Optional[str], Optional[str], Op
         exit(1)
 
     ctime = "{:%Y_%h_%d.%H_%M}".format(datetime.datetime.now())
-    folder_name = "ceph_report.{}.{}".format(opts.cluster, ctime)
-    arch_name = "ceph_report.{}.{}.tar.gz".format(opts.cluster, ctime)
+    folder_name = "ceph_report.{}.{}.{}".format(opts.customer, opts.cluster, ctime)
+    arch_name = "ceph_report.{}.{}.{}.tar.gz".format(opts.customer, opts.cluster, ctime)
 
     output_folder = os.path.join(opts.base_folder, opts.output_folder, folder_name)
     output_arch = os.path.join(opts.base_folder, opts.output_folder, arch_name)
@@ -1268,7 +1268,8 @@ def parse_args(argv: List[str]) -> Any:
     collect.add_argument("--inventory", metavar='FILE',
                          help="Path to file with list of ssh ip/names of ceph nodes")
     collect.add_argument("--dont-pack-result", action="store_true", help="Don't create archive")
-    collect.add_argument("--cluster", help="Cluster name", required=True)
+    collect.add_argument("--cluster", help="Cluster name, should match [a-zA-Z_0-9-]+", required=True)
+    collect.add_argument("--customer", help="Customer name, should match [a-zA-Z_0-9-]+", required=True)
     collect.add_argument("--output-folder", help="Folder to put result to", default="/tmp")
     collect.add_argument("--no-sudo", action="store_true", help="Don't run agent with sudo on remote nodes")
     collect.add_argument("--base-folder", default=".", help="Base folder for all paths")
@@ -1319,6 +1320,14 @@ def main(argv: List[str]) -> int:
 
     if opts.subparser_name == 'collect':
         try:
+            if not re.match("[0-9a-zA-Z_-]+$", opts.cluster):
+                logger.error("Cluster name incorrect - %s, should match [0-9a-zA-Z_-]+$", opts.cluster)
+                return 1
+
+            if not re.match("[0-9a-zA-Z_-]+$", opts.customer):
+                logger.error("Customer name incorrect - %s, should match [0-9a-zA-Z_-]+$", opts.customer)
+                return 1
+
             inv_path, output_folder, output_arch = check_and_prepare_paths(opts)
             setup_logging(opts.log_level, log_config, output_folder, opts.persistent_log)
             logger.info(repr(argv))

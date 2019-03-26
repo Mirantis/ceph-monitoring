@@ -1,4 +1,5 @@
 import collections
+import logging
 from enum import Enum
 from typing import List, Dict, Callable, Any, Optional, Tuple
 from dataclasses import dataclass
@@ -35,6 +36,9 @@ from cephlib.units import b2ssize
 # check that all osd of same crush node has the same ip in osdmap
 # check gaps in osd map
 # network/storage devices with no load
+
+
+logger = logging.getLogger("cephlib.checks")
 
 
 class Severity(Enum):
@@ -245,7 +249,7 @@ def max_journal_per_device(config: CheckConfig, cluster: Cluster, ceph: CephInfo
                     f"Device {disk.name} has {count} journals, max {max_journals} recommended",
                     host_t(host.name))
 
-    report.add_result(fcount == 0, "" if fcount == 0 else f"{fcount} devices have too may journals")
+    report.add_result(fcount == 0, "" if fcount == 0 else f"{fcount} devices have too many journals")
 
 
 @checker(Severity.warning, "PG for OSD mast be in configured range")
@@ -405,6 +409,10 @@ def all_osds_in_root_the_same(config: CheckConfig, cluster: Cluster, ceph: CephI
             if osd.storage_info:
                 sizes[osd.storage_info.data.partition_info.size] += 1
                 types[osd.storage_info.data.dev_info.tp] += 1
+
+        if len(sizes) == 0:
+            logging.warning("Crush rule %s has no osd in it", rule.name)
+            continue
 
         most_often_size = sorted((count, sz) for sz, count in sizes.items())[0][1]
         most_often_type = sorted((count, tp) for tp, count in types.items())[0][1]

@@ -3,7 +3,9 @@ import logging
 import urllib.request
 from pathlib import Path
 from urllib.error import URLError
-from typing import Optional, List, Any, Tuple
+from typing import Optional, List, Any, Tuple, Dict
+
+from .checks import CheckMessage
 
 logger = logging.getLogger('report')
 
@@ -20,6 +22,7 @@ class Report:
         self.scripts: List[str] = []
         self.divs: List[Tuple[str, Optional[str], Optional[str], str]] = []
         self.onload: List[str] = ["onHashChanged()"]
+        self.issues: Dict[str, List[CheckMessage]] = {}
 
     def add_block(self, name: str, header: Optional[str], block_obj: Any, menu_item: str = None):
         if menu_item is None:
