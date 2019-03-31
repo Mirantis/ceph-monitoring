@@ -1,1017 +1,90 @@
+import os
 import re
-import abc
 import sys
-import time
 import json
-import zlib
-import errno
-import array
-import socket
-import random
 import shutil
-import pathlib
 import logging
 import os.path
+import asyncio
 import argparse
 import datetime
 import tempfile
-import ipaddress
-import threading
-import contextlib
 import subprocess
 import logging.config
-from collections import namedtuple
-from concurrent.futures import ThreadPoolExecutor, Executor
-from typing import Dict, Any, List, Tuple, Set, Callable, Optional, Union, Type, Iterator, NamedTuple, cast, Iterable
+from pathlib import Path
+from typing import Dict, Any, List, Tuple, Set, Callable, Optional, Type, Iterator, Coroutine
 
-from agent.agent import ConnectionClosed, SimpleRPCClient
+from dataclasses import dataclass
+
 from cephlib.storage import make_storage, IStorageNNP
-from cephlib.common import run_locally
-from cephlib.rpc import init_node, rpc_run
-from cephlib.discover import get_osds_nodes, get_mons_nodes, OSDInfo
+
+AGENT_PATH = os.environ.get("RPC_AGENT_PATH", "/opt/mirantis/agent")
+sys.path.append(AGENT_PATH)
+
+from .collect_node_classes import INode, Node, Local
+from .collectors import Collector, CephDataCollector, NodeCollector, LUMINOUS_MAX_PG, DEFAULT_MAX_PG, AUTOPG
+from .collect_utils import init_rpc_and_fill_data, CephServices, discover_ceph_services, iter_extra_host
 
 
 logger = logging.getLogger('collect')
 
 
-ExecResult = NamedTuple('ExecResult', [('code', int), ('output_b', bytes), ('output', str)])
-AUTOPG = -1
-
-
 base_files_path = os.path.join(os.path.dirname(sys.argv[0]), 'files')
-get_file_path = lambda fname: os.path.join(base_files_path, fname)
 
 
-#  -------------------   Node classes and interfaces -------------------------------------------------------------------
-
-
-class INode(metaclass=abc.ABCMeta):
-    name = ""  # type: str
-
-    @abc.abstractmethod
-    def run_exc(self, cmd: str, **kwargs) -> bytes:
-        pass
-
-    @abc.abstractmethod
-    def get_file(self, name: str, compress: bool = False) -> bytes:
-        pass
-
-    def run(self, cmd: str, encoding: str = 'utf8', **kwargs) -> ExecResult:
-        code = 0
-        try:
-            raw = self.run_exc(cmd, **kwargs)
-        except subprocess.CalledProcessError as exc:
-            code = exc.returncode
-            raw = exc.output
-        except subprocess.TimeoutExpired:
-            code = errno.ETIMEDOUT
-            raw = b"TIMEOUTED"
-
-        return ExecResult(code, raw, raw.decode(encoding))
-
-    @abc.abstractmethod
-    def exists(self, fname: str) -> bool:
-        pass
-
-    @abc.abstractmethod
-    def listdir(self, path: str) -> Iterable[str]:
-        pass
-
-
-class Node(INode):
-    def __init__(self, ssh_enpoint: str, hostname: str, rpc: SimpleRPCClient, cmd_run_timeout: int = 60) -> None:
-        self.ssh_enpoint = ssh_enpoint
-        self.hostname = hostname
-        self.rpc = rpc
-        self.osds = []   # type: List[OSDInfo]
-        self.all_ips = {ssh_enpoint}  # type: Set[str]
-        self.mon = None  # type: Optional[str]
-        self.load_config = {}  # type: Dict[str, Any]
-        self.cmd_run_timeout = cmd_run_timeout
-
-    def __cmp__(self, other: 'Node') -> int:
-        x = (self.hostname, self.ssh_enpoint)
-        y = (other.hostname, other.ssh_enpoint)
-        if x == y:
-            return 0
-        return 1 if x > y else -1
-
-    def dct(self) -> Dict[str, Any]:
-        return {'name': self.hostname, 'ssh_enpoint': self.ssh_enpoint, 'all_ips': list(self.all_ips)}
-
-    @property
-    def name(self) -> str:  # type: ignore
-        return self.hostname
-
-    def __str__(self) -> str:
-        return "Node(name={0.name}, ssh_enpoint={0.ssh_enpoint})".format(self)
-
-    def merge(self, other: 'Node', overwrite_ssh: bool = True):
-
-        if self.mon and not other.mon:
-            self.mon = other.mon
-
-        self.osds = list(set(self.osds + other.osds))
-
-        if overwrite_ssh:
-            self.ssh_enpoint = other.ssh_enpoint
-
-        if not self.hostname and other.hostname:
-            self.hostname = other.hostname
-
-        self.all_ips.update(other.all_ips)
-
-    def run_exc(self, cmd: str, **kwargs) -> bytes:
-        assert self.rpc is not None
-        assert 'node_name' not in kwargs
-        if 'timeout' not in kwargs:
-            kwargs['timeout'] = self.cmd_run_timeout
-        return rpc_run(self.rpc, cmd, node_name=self.name, **kwargs)
-
-    def get_file(self, name: str, compress: bool = False) -> bytes:
-        data = self.rpc.fs.get_file(name, compress=compress)
-        return zlib.decompress(data) if compress else data
-
-    def ceph_info(self) -> str:
-        info = self.name
-        if self.mon:
-            info += " mon=" + self.mon
-        if self.osds:
-            info += " osds=[" + ",".join(str(osd.id) for osd in self.osds) + "]"
-        return info
-
-    def exists(self, fname: str) -> bool:
-        return self.rpc.fs.file_exists(fname)
-
-    def listdir(self, path: str) -> Iterable[str]:
-        return self.rpc.fs.listdir(path)
-
-
-class Local(INode):
-    name = 'localhost'
-
-    def run_exc(self, cmd: str, **kwargs) -> bytes:
-        assert 'node_name' not in kwargs
-        return run_locally(cmd, **kwargs)
-
-    def __str__(self) -> str:
-        return "Localhost()"
-
-    def get_file(self, name: str, compress: bool = False) -> bytes:
-        return open(name, 'rb').read()
-
-    def exists(self, fname: str) -> bool:
-        return os.path.exists(fname)
-
-    def listdir(self, path: str) -> Iterable[str]:
-        return [i for i in os.listdir(path) if i not in ('.', '..')]
-
-
-# ------------ HELPER FUNCTIONS: GENERAL -------------------------------------------------------------------------------
-
-
-def ip_and_hostname(ip_or_hostname: str) -> Tuple[str, Optional[str]]:
-    """returns (ip, maybe_hostname)"""
-    try:
-        ipaddress.ip_address(ip_or_hostname)
-        return ip_or_hostname, None
-    except ValueError:
-        return socket.gethostbyname(ip_or_hostname), ip_or_hostname
-
-
-# ------------ HELPER FUNCTIONS: PARSERS -------------------------------------------------------------------------------
-
-
-def parse_ipa4(data: str) -> Set[str]:
-    """
-    parse 'ip -o -4 a' output
-    """
-    res = set()
-    # 26: eth0    inet 169.254.207.170/16
-    for line in data.split("\n"):
-        line = line.strip()
-        if line:
-            _, dev, _, ip_sz, *_ = line.split()
-            ip, sz = ip_sz.split('/')
-            ipaddress.IPv4Address(ip)
-            res.add(ip)
-    return res
-
-
-def parse_proc_file(fc: str, ignore_err: bool = False) -> Dict[str, str]:
-    res = {}  # type: Dict[str, str]
-    for ln in fc.split("\n"):
-        ln = ln.strip()
-        if ln:
-            try:
-                name, val = ln.split(":")
-            except ValueError:
-                if not ignore_err:
-                    raise
-            else:
-                res[name.strip()] = val.strip()
-    return res
-
-
-def parse_devices_tree(lsblkdct: Dict[str, Any]) -> Dict[str, str]:
-    def fall_down(fnode: Dict[str, Any], root: str, res_dict: Dict[str, str]):
-        res_dict['/dev/' + fnode['name']] = root
-        for ch_node in fnode.get('children', []):
-            fall_down(ch_node, root, res_dict)
-
-    res = {}  # type: Dict[str, str]
-    for node in lsblkdct['blockdevices']:
-        fall_down(node, '/dev/' + node['name'], res)
-        res['/dev/' + node['name']] = '/dev/' + node['name']
-    return res
-
-
-def parse_sockstat_file(fc: str) -> Optional[Dict[str, Dict[str, str]]]:
-    res = {}  # type: Dict[str, Dict[str, str]]
-    for ln in fc.split("\n"):
-        if ln.strip():
-            if ':' not in ln:
-                return None
-            name, params = ln.split(":", 1)
-            params_l = params.split()
-            if len(params_l) % 2 != 0:
-                return None
-            res[name] = dict(zip(params_l[:-1:2], params_l[1::2]))
-    return res
-
-
-# ------------ HELPER FUNCTIONS: RPC -----------------------------------------------------------------------------------
-
-
-def get_host_interfaces(rpc: INode) -> List[Tuple[bool, str]]:
-    """Return list of host interfaces, returns pair (is_physical, name)"""
-    res = []  # type: List[Tuple[bool, str]]
-    content = rpc.run("ls -l /sys/class/net").output
-
-    for line in content.strip().split("\n")[1:]:
-        if not line.startswith('l'):
-            continue
-
-        params = line.split()
-        if len(params) < 11:
-            continue
-
-        res.append(('/devices/virtual/' not in params[10], params[8]))
-    return res
-
-
-def get_device_for_file(node: Node, fname: str) -> Tuple[str, str]:
-    """Find storage device, on which file is located"""
-
-    dev = node.rpc.fs.get_dev_for_file(fname)
-    dev = dev.decode('utf8')
-    assert dev.startswith('/dev'), "{!r} is not starts with /dev".format(dev)
-    root_dev = dev = dev.strip()
-    rr = re.match('^(/dev/[shv]d.*?)\\d+', root_dev)
-    if rr:
-        root_dev = rr.group(1)
-    return root_dev, dev
-
-
-CephServices = NamedTuple('CephServices', [('mons', Dict[str, str]), ('osds', Dict[str, List[OSDInfo]])])
-
-
-def discover_ceph_services(master_node: INode, opts: Any, thcount: int = 1) -> CephServices:
-    """Find ceph monitors and osds using ceph osd dump and ceph mon_map"""
-
-    exec_func = lambda x: master_node.run_exc(x).decode('utf8')
-
-    mons = {}  # type: Dict[str, str]
-    for mon_id, (ip, name) in get_mons_nodes(exec_func, opts.ceph_extra).items():
-        assert ip not in mons
-        mons[ip] = name
-
-    osds = {}  # type: Dict[str, List[OSDInfo]]
-    osd_nodes = get_osds_nodes(exec_func, opts.ceph_extra, get_config=False)
-    for ip, osds_info in osd_nodes.items():
-        assert ip not in osds
-        osds[ip] = osds_info
-
-    return CephServices(mons, osds)
-
-
-def init_rpc_and_fill_data(ips_or_hostnames: List[str],
-                           ssh_opts: str,
-                           executor: Executor,
-                           with_sudo: bool) -> Tuple[List[Node], List[Tuple[str, str]]]:
-    """Connect to nodes and fill Node object with basic node info: ips and hostname"""
-
-    rpc_nodes = []  # type: List[Node]
-    failed_nodes = []  # type: List[Tuple[str, str]]
-
-    def init_node_with_code(ips_or_hostname: str) -> Tuple[bool, Union[Node, str]]:
-        # TODO: hack for logging & threadpool
-        threading.current_thread().name = ips_or_hostname
-
-        try:
-            rpc, _ = init_node(ips_or_hostname, ssh_opts=ssh_opts, with_sudo=with_sudo)
-            hostname = rpc_run(rpc, "hostname", node_name=ips_or_hostname).strip().decode('utf8')
-            node = Node(ssh_enpoint=ips_or_hostname, hostname=hostname, rpc=rpc)
-            node.all_ips.update(parse_ipa4(node.run("ip -o -4 a").output))
-            logger.debug("%s -> %s, %s", node.ssh_enpoint, node.hostname, node.all_ips)
-            return True, node
-        except Exception as exc:
-            return False, str(exc)
-
-    hostnames = set()  # type: Set[str]
-    for name_or_ip, (is_ok, node_or_err) in zip(ips_or_hostnames, executor.map(init_node_with_code, ips_or_hostnames)):
-        if is_ok:
-            assert isinstance(node_or_err, Node)
-            rpc_nodes.append(node_or_err)
-            assert node_or_err.hostname not in hostnames
-            hostnames.add(node_or_err.hostname)
-        else:
-            assert isinstance(node_or_err, str)
-            failed_nodes.append((name_or_ip, node_or_err))
-
-    return rpc_nodes, failed_nodes
-
-
-def iter_extra_host(inventory_path: Optional[str]) -> Iterator[str]:
-    """Iterate over all extra hosts from --inventory options, if some"""
-    if inventory_path:
-        with open(inventory_path) as fd:
-            for ln in fd:
-                ln = ln.strip()
-                if ln and not ln.startswith("#"):
-                    assert ':' not in ln
-                    assert len(ln.split()) == 1
-                    yield ln
-
-
-#  ---------------  COLLECTORS -----------------------------------------------------------------------------------------
-
-
-CMDRes = namedtuple("CMDRes", ["stdout", "code"])
-
-class Collector:
-    """Base class for data collectors. Can collect data for only one node."""
-    name = None  # type: str
-    collect_roles = []  # type: List[str]
-
-    def __init__(self,
-                 storage: IStorageNNP,
-                 opts: Any,
-                 node: INode,
-                 pretty_json: bool = False) -> None:
-        self.storage = storage
-        self.opts = opts
-        self.node = node
-        self.pretty_json = pretty_json
-
-    def set_thread_name(self):
-        try:
-            threading.current_thread().name = self.node.name
-        except AttributeError:
-            threading.current_thread().name = '????'
-
-    @contextlib.contextmanager
-    def chdir(self, path: str):
-        """Chdir for point in storage tree, where current results are stored"""
-        saved = self.storage
-        self.storage = self.storage.sub_storage(path)
-        try:
-            yield
-        finally:
-            self.storage = saved
-
-    def save_raw(self, path: str, data: bytes):
-        self.storage.put_raw(data, path)
-
-    def save(self, path: str, frmt: str, code: int, data: Union[str, bytes, array.array],
-             extra: List[str] = None) -> str:
-        """Save results into storage"""
-        if code == 0 and frmt == 'json' and self.pretty_json:
-            assert isinstance(data, (str, bytes))
-            data = json.dumps(json.loads(data), indent=4, sort_keys=True)
-
-        rpath = "{}.{}".format(path, frmt if code == 0 else "err")
-
-        if isinstance(data, str):
-            assert extra is None
-            self.save_raw(rpath, data.encode('utf8'))
-        elif isinstance(data, bytes):
-            assert extra is None
-            self.save_raw(rpath, data)
-        elif isinstance(data, array.array):
-            self.storage.put_array(rpath, data, extra if extra else [])
-        else:
-            raise TypeError("Can't save value of type {!r} (to {!r})".format(type(data), rpath))
-
-        return data
-
-    def save_file(self, path: str, file_path: str, frmt: str = 'txt', compress: bool = True) -> bytes:
-        """Download file from node and save it into storage"""
-        try:
-            content = self.node.get_file(file_path, compress=compress)
-            code = 0
-        except (IOError, RuntimeError) as exc:
-            logger.warning("Can't get file %r from node %s. %s", file_path, self.node, exc)
-            content = str(exc)  # type: ignore
-            code = 1
-
-        self.save(path, frmt, code, content)
-        return content if code == 0 else None  # type: ignore
-
-    def save_output(self, path: str, cmd: str, frmt: str = 'txt') -> CMDRes:
-        """Run command on node and store result into storage"""
-        code, _, out = self.node.run(cmd)
-
-        if code != 0:
-            logger.warning("Cmd %s failed %s with code %s", cmd, self.node, code)
-            frmt = 'err'
-
-        self.save(path, frmt, code, out)
-        return CMDRes(code=code, stdout=out)
-
-
-DEFAULT_MAX_PG = 2 ** 15
-LUMINOUS_MAX_PG = 2 ** 17
-
-
-class CephDataCollector(Collector):
-    name = 'ceph'
-    collect_roles = ['osd', 'mon', 'ceph-master']
-    master_collected = False
-    cluster_name = 'ceph'
-    num_pgs = None
-
-    def __init__(self, *args, **kwargs) -> None:
-        Collector.__init__(self, *args, **kwargs)
-        opt = self.opts.ceph_extra + (" " if self.opts.ceph_extra else "")
-        self.radosgw_admin_cmd = "radosgw-admin {}".format(opt)
-        self.ceph_cmd = "ceph {}--format json ".format(opt)
-        self.ceph_cmd_txt = "ceph {}".format(opt)
-        self.rbd_cmd = "rbd {} ".format(opt)
-        self.rados_cmd = "rados {}--format json ".format(opt)
-        self.rados_cmd_txt = "rados {}".format(opt)
-
-    def collect_master(self) -> None:
-        self.set_thread_name()
-        with self.chdir("master"):
-            curr_data = "{}\n{}\n{}".format(
-                datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
-                time.time())
-
-            code, _, out = self.node.run(self.ceph_cmd + "osd versions")
-            is_luminous = (code == 0)
-            if is_luminous:
-                self.save("osd_versions2", 'txt', 0, out)
-                self.save_output("mon_versions2", self.ceph_cmd + "mon versions", "txt")
-                self.save_output("mgr_versions2", self.ceph_cmd + "mgr versions", "txt")
-
-            self.save_output("osd_versions", self.ceph_cmd + "tell 'osd.*' version", "txt")
-            self.save_output("mon_versions", self.ceph_cmd + "tell 'mon.*' version", "txt")
-
-            self.save("collected_at", 'txt', 0, curr_data)
-            status = json.loads(self.save_output("status", self.ceph_cmd + "status", 'json').stdout)
-
-            health = status['health']
-            status_str = health['status'] if 'status' in health else health['overall_status']
-            ceph_health = {'status': status_str}  # type: Dict[str, Union[str, int]]
-            avail = status['pgmap']['bytes_avail']
-            total = status['pgmap']['bytes_total']
-            ceph_health['free_pc'] = int(avail * 100 / total + 0.5)
-
-            active_clean = sum(pg_sum['count']
-                               for pg_sum in status['pgmap']['pgs_by_state']
-                               if pg_sum['state_name'] == "active+clean")
-            total_pg = status['pgmap']['num_pgs']
-            ceph_health["ac_perc"] = int(active_clean * 100 / total_pg + 0.5)
-            ceph_health["blocked"] = "unknown"
-
-            ceph_health_js = json.dumps(ceph_health)
-            self.save("ceph_health_dict", "js", 0, ceph_health_js)
-
-            self.__class__.num_pgs = status['pgmap']['num_pgs']  # type: ignore
-
-            max_pg = (LUMINOUS_MAX_PG if is_luminous else DEFAULT_MAX_PG) \
-                     if AUTOPG == self.opts.max_pg_dump_count \
-                     else self.opts.max_pg_dump_count
-
-            if self.__class__.num_pgs > max_pg:    # type: ignore
-                logger.warning(
-                    ("pg dump skipped, as num_pg ({}) > max_pg_dump_count ({})." +
-                     " Use --max-pg-dump-count NUM option to change the limit").format(
-                         self.__class__.num_pgs, max_pg))    # type: ignore
-                cmds = []  # type: List[str]
-            else:
-                cmds = ['pg dump']
-
-            cmds.extend(['osd tree',
-                         'df',
-                         'auth list',
-                         'health',
-                         'mon_status',
-                         'osd lspools',
-                         'osd perf',
-                         'osd df',
-                         'health detail',
-                         "osd crush dump",
-                         "node ls",
-                         "features",
-                         "report",
-                         "time-sync-status"])
-
-            for cmd in cmds:
-                self.save_output(cmd.replace(" ", "_").replace("-", '_'), self.ceph_cmd + cmd, 'json')
-
-            osd_dump = self.save_output('osd_dump', self.ceph_cmd + "osd dump", 'json')
-
-            if not self.opts.no_rbd_info:
-                rbd_pools = []
-                if osd_dump and osd_dump[0] == 0:
-                    for pool in json.loads(osd_dump[1])['pools']:
-                        if 'application_metadata' in pool:
-                            if 'rbd' in pool.get('application_metadata'):
-                                rbd_pools.append(pool['pool_name'])
-                        elif 'rgw' not in pool['pool_name']:
-                            rbd_pools.append(pool['pool_name'])
-
-                for pool in rbd_pools:
-                    self.save_output('rbd_du_{}'.format(pool), self.rbd_cmd + "du", 'txt')
-                    cmd = 'for image in $(rbd list -p rbd) ; do echo "{}" ; echo "$image" ; {} info "$image" ; done'
-                    cmd = cmd.format('-' * 60, self.rbd_cmd)
-                    self.save_output("rbd_images_{}".format(pool), cmd, "txt")
-
-            self.save_output("rados_df", self.rados_cmd + "df", 'json')
-            self.save_output("rados_df", self.rados_cmd_txt + "df", 'txt')
-
-            self.save_output("realm_list", self.radosgw_admin_cmd + "realm list", "txt")
-            self.save_output("zonegroup_list", self.radosgw_admin_cmd + "zonegroup list", "txt")
-            self.save_output("zone_list", self.radosgw_admin_cmd + "zone list", "txt")
-
-            self.save_output("default_config", self.ceph_cmd_txt + "--show-config", 'txt')
-            self.save_output("ceph_s", self.ceph_cmd_txt + "-s", 'txt')
-            self.save_output("ceph_osd_dump", self.ceph_cmd_txt + "osd dump", 'txt')
-            self.save_output("osd_utilization", self.ceph_cmd_txt + 'osd utilization', 'txt')
-            self.save_output("osd_blocked_by", self.ceph_cmd_txt + "osd blocked-by", "txt")
-            self.save_output("osd dump", self.ceph_cmd_txt + "osd dump", "txt")
-
-            temp_fl = "%08X" % random.randint(0, 2 << 64)
-            cr_fname = "/tmp/ceph_collect." + temp_fl + ".cr"
-            code, _, _ = self.node.run(self.ceph_cmd + "osd getcrushmap -o " + cr_fname)
-            if code != 0:
-                logger.error("Fail to get crushmap")
-            else:
-                self.save_file('crushmap', cr_fname, 'bin')
-                code, _, _ = self.node.run("crushtool -d {0} -o {0}.txt".format(cr_fname))
-                if code != 0:
-                    logger.error("Fail to decompile crushmap")
-                else:
-                    self.save_file('crushmap', cr_fname + ".txt", 'txt')
-
-            osd_fname = "/tmp/ceph_collect." + temp_fl + ".osd"
-            code, _, _ = self.node.run(self.ceph_cmd + "osd getmap -o " + osd_fname)
-            if code != 0:
-                logger.error("Fail to get osdmap")
-            else:
-                self.save_file('osdmap', osd_fname, 'bin')
-                self.save_output('osdmap', "osdmaptool --print " + osd_fname, "txt")
-
-    def collect_osd(self):
-        assert isinstance(self.node, Node)
-        self.set_thread_name()
-        # check OSD process status
-        out = self.node.run("ps aux | grep ceph-osd").output
-        osd_re = re.compile(r"ceph-osd[\t ]+.*(-i|--id)[\t ]+(\d+)")
-        running_osds = set(int(rr.group(2)) for rr in osd_re.finditer(out))
-
-        ids_from_ceph = set(osd.id for osd in cast(Node, self.node).osds)
-        unexpected_osds = running_osds.difference(ids_from_ceph)
-
-        for osd_id in unexpected_osds:
-            logger.warning("Unexpected osd-{} in node {}.".format(osd_id, self.node))
-
-        with self.chdir('hosts/' + self.node.name):
-            self.save_output("cephdisk", "ceph-disk list")
-            self.save_output("cephvolume", "ceph-volume lvm list")
-            cephdisklist_js, code_disk = self.save_output("cephdisk", "ceph-disk list --format=json", "json")
-            cephvollist_js, code_vol = self.save_output("cephvolume", "ceph-volume lvm list --format json", "json")
-
-            lsblk_js = self.save_output("lsblk", "lsblk -a --json", "json").stdout
-            self.save_output("lsblk", "lsblk -a")
-
-        devs_for_osd = {}  # type: Dict[int, Dict[str, str]]
-        dev_tree = parse_devices_tree(json.loads(lsblk_js))
-
-        if code_vol == 0:
-            cephvolume_dct = json.loads(cephvollist_js)
-            for osd_id_s, osd_data in cephvolume_dct.items():
-                assert len(osd_data) == 1
-                osd_data = osd_data[0]
-                assert len(osd_data['devices']) == 1
-                dev = osd_data['devices'][0]
-                devs_for_osd[int(osd_id_s)] = {"block_dev": dev,
-                                               "block.db_dev": dev,
-                                               "block.wal_dev": dev,
-                                               "store_type": "bluestore"}
-
-        if code_disk == 0:
-            cephdisk_dct = json.loads(cephdisklist_js)
-            for dev_info in cephdisk_dct:
-                for part_info in dev_info.get('partitions', []):
-                    if "cluster" in part_info and part_info.get('type') == 'data':
-                        osd_id = int(part_info['whoami'])
-                        devs_for_osd[osd_id] = {attr: part_info[attr]
-                                                for attr in ("block_dev", "journal_dev", "path",
-                                                             "block.db_dev", "block.wal_dev")
-                                                if attr in part_info}
-                        devs_for_osd[osd_id]['store_type'] = 'filestore' if "journal_dev" in part_info else 'bluestore'
-
-        for osd in self.node.osds:
-            with self.chdir('osd/{}'.format(osd.id)):
-                cmd = "tail -n {} /var/log/ceph/ceph-osd.{}.log".format(self.opts.ceph_log_max_lines, osd.id)
-                self.save_output("log", cmd)
-
-                osd_daemon_cmd = "ceph --admin-daemon /var/run/ceph/ceph-osd.{}.asok".format(osd.id)
-                self.save_output("perf_dump", osd_daemon_cmd + " perf dump")
-                self.save_output("perf_hist_dump", osd_daemon_cmd + " perf histogram dump".format(osd.id))
-
-                # TODO: much of this can be done even id osd is down for filestore
-                if osd.id in running_osds:
-                    if not osd.config:
-                        config, code = self.save_output("config",
-                                                        "ceph daemon osd.{} config show".format(osd.id),
-                                                        "json")
-                        assert code == 0
-                        self.save("config", "json", 0, config)
-                    else:
-                        self.save("config", "txt", 0, osd.config)
-                else:
-                    logger.warning("osd-{} in node {} is down. No config available".format(osd.id, self.node.name))
-
-                if osd.id in devs_for_osd:
-                    stor_type = devs_for_osd[osd.id]['store_type']
-
-                    if stor_type == 'filestore':
-                        data_dev = devs_for_osd[osd.id]["path"]
-                        j_dev = devs_for_osd[osd.id]["journal_dev"]
-                        osd_dev_conf = {'data': data_dev,
-                                        'journal': j_dev,
-                                        'r_data': dev_tree[data_dev],
-                                        'r_journal': dev_tree[j_dev],
-                                        'type': stor_type}
-                    else:
-                        assert stor_type == 'bluestore'
-                        data_dev = devs_for_osd[osd.id]["block_dev"]
-                        db_dev = devs_for_osd[osd.id].get('block.db_dev', data_dev)
-                        wal_dev = devs_for_osd[osd.id].get('block.wal_dev', db_dev)
-                        osd_dev_conf = {'data': data_dev,
-                                        'wal': wal_dev,
-                                        'db': db_dev,
-                                        'r_data': dev_tree[data_dev],
-                                        'r_wal': dev_tree[wal_dev],
-                                        'r_db': dev_tree[db_dev],
-                                        'type': stor_type}
-
-                    self.save('devs_cfg', 'json', 0, json.dumps(osd_dev_conf))
-                else:
-                    self.save('devs_cfg', 'json', 0, json.dumps({}))
-
-        pids = self.node.rpc.sensors.find_pids_for_cmd('ceph-osd')
-        logger.debug("Found next pids for OSD's on node %s: %r", self.node.name, pids)
-        if pids:
-            for pid in pids:
-                self.collect_osd_process_info(pid)
-
-    def collect_osd_process_info(self, pid: int):
-        logger.debug("Collecting info for OSD with pid %s", pid)
-        assert isinstance(self.node, Node)
-        self.set_thread_name()
-
-        cmdline = self.node.get_file('/proc/{}/cmdline'.format(pid)).decode('utf8')
-        opts = cmdline.split("\x00")
-        for op, val in zip(opts[:-1], opts[1:]):
-            if op in ('-i', '--id'):
-                osd_id = val
-                break
-        else:
-            logger.warning("Can't get osd id for cmd line %r", cmdline.replace("\x00", ' '))
-            return
-
-        osd_proc_info = {}  # type: Dict[str, Any]
-
-        with self.chdir('osd/{}'.format(osd_id)):
-            pid_dir = "/proc/{}/".format(pid)
-            self.save("cmdline", "bin", 0, cmdline)
-            osd_proc_info['fd_count'] = len(self.node.rpc.fs.listdir(pid_dir + "fd"))
-
-            fpath = pid_dir + "net/sockstat"
-            ssv4 = parse_sockstat_file(self.node.get_file(fpath).decode('utf8'))
-            if not ssv4:
-                logger.warning("Broken file {!r} on node {}".format(fpath, self.node))
-            else:
-                osd_proc_info['ipv4'] = ssv4
-
-            fpath = pid_dir + "net/sockstat6"
-            ssv6 = parse_sockstat_file(self.node.get_file(fpath).decode('utf8'))
-            if not ssv6:
-                logger.warning("Broken file {!r} on node {}".format(fpath, self.node))
-            else:
-                osd_proc_info['ipv6'] = ssv6
-            osd_proc_info['sock_count'] = self.node.rpc.sensors.count_sockets_for_process(pid)
-
-            proc_stat = self.node.get_file(pid_dir + "status").decode('utf8')
-            self.save("proc_status", "txt", 0, proc_stat)
-            osd_proc_info['th_count'] = int(proc_stat.split('Threads:')[1].split()[0])
-
-            # IO stats
-            io_stat = self.node.get_file(pid_dir + "io").decode('utf8')
-            osd_proc_info['io'] = parse_proc_file(io_stat)
-
-            # Mem stats
-            mem_stat = self.node.get_file(pid_dir + "status").decode('utf8')
-            osd_proc_info['mem'] = parse_proc_file(mem_stat)
-
-            # memmap
-            mem_map = self.node.get_file(pid_dir + "maps", compress=True).decode('utf8')
-            osd_proc_info['memmap'] = []
-            for ln in mem_map.strip().split("\n"):
-                mem_range, access, offset, dev, inode, *pathname = ln.split()
-                osd_proc_info['memmap'].append([mem_range, access, " ".join(pathname)])
-
-            # sched
-            sched = self.node.get_file(pid_dir + "sched", compress=True).decode('utf8')
-            try:
-                data = "\n".join(sched.strip().split("\n")[2:])
-                osd_proc_info['sched'] = parse_proc_file(data, ignore_err=True)
-            except:
-                osd_proc_info['sched'] = {}
-                osd_proc_info['sched_raw'] = sched
-
-            stat = self.node.get_file(pid_dir + "stat").decode('utf8')
-            osd_proc_info['stat'] = stat.split()
-
-            self.save("procinfo", "json", 0, json.dumps(osd_proc_info))
-
-    def collect_monitor(self) -> None:
-        assert isinstance(self.node, Node)
-        self.set_thread_name()
-        assert self.node.mon is not None
-
-        with self.chdir("mon/{}".format(self.node.mon)):
-            self.save_output("mon_daemons", "ps aux | grep ceph-mon")
-            tail_ln = "tail -n {} ".format(self.opts.ceph_log_max_lines)
-            self.save_output("mon_log", tail_ln + "/var/log/ceph/ceph-mon.{}.log".format(self.node.mon))
-            self.save_output("ceph_log", tail_ln + " /var/log/ceph/ceph.log")
-
-            log_issues = self.node.rpc.sensors.find_issues_in_ceph_log(self.opts.ceph_log_max_lines)
-            self.save("ceph_log_wrn_err", "txt", 0, log_issues)
-
-            # TODO: fix me
-            try:
-                # sometime unknown exc happened
-                issues_count, regions = self.node.rpc.sensors.analyze_ceph_logs_for_issues()
-                self.save("log_issues_count", "json", 0, json.dumps(issues_count))
-                self.save("status_regions", "json", 0, json.dumps(regions))
-            except Exception:
-                pass
-
-            self.save_output("ceph_audit", tail_ln + " /var/log/ceph/ceph.audit.log")
-            self.save_output("config", self.ceph_cmd + "daemon mon.{} config show".format(self.node.mon),
-                             frmt='json')
-
-            self.save_output("ceph_var_dirs_size", "du -s /var/lib/ceph/m*")
-
-            log_issues = self.node.rpc.sensors.find_issues_in_ceph_log(self.opts.ceph_log_max_lines)
-            self.save("ceph_log_wrn_err", "txt", 0, log_issues)
-
-
-class NodeCollector(Collector):
-    name = 'node'
-    collect_roles = ['node']
-
-    node_commands = [
-        ("df", 'txt', 'df'),
-        ("dmidecode", "txt", "dmidecode"),
-        ("dmesg", "txt", "dmesg"),
-        ("ipa4", "txt", "ip -o -4 a"),
-        ("ipa", "txt", "ip a"),
-        ("ifconfig", "txt", "ifconfig"),
-        ("ifconfig_short", "txt", "ifconfig -s"),
-        ("lshw", "xml", "lshw -xml"),
-        ("lsblk", "txt", "lsblk -O"),
-        ("lsblk_short", "txt", "lsblk"),
-        ("mount", "txt", "mount"),
-        ("netstat", "txt", "netstat -nap"),
-        ("netstat_stat", "txt", "netstat -s"),
-        ("sysctl", "txt", "sysctl -a"),
-        ("uname", "txt", "uname -a"),
-    ]
-
-    node_files = [
-        "/proc/diskstats", "/proc/meminfo", "/proc/loadavg", "/proc/cpuinfo", "/proc/uptime", "/proc/vmstat"
-    ]
-
-    node_renamed_files = [("netdev", "/proc/net/dev"),
-                          ("dev_netstat", "/proc/net/netstat"),
-                          ("softnet_stat", "/proc/net/softnet_stat"),
-                          ("ceph_conf", "/etc/ceph/ceph.conf")]
-
-    def collect(self) -> None:
-        self.set_thread_name()
-        with self.chdir('hosts/' + self.node.name):
-            self.collect_kernel_modules_info()
-            self.collect_common_features()
-            self.collect_files()
-            self.collect_bonds_info()
-            self.collect_interfaces_info()
-            self.collect_block_devs()
-            self.collect_packages()
-
-    def collect_kernel_modules_info(self):
-        try:
-            self.save_output("lsmod", "lsmod", frmt="txt")
-        except Exception as exc:
-            logger.warning("Failed to list kernel modules: %r on node %s: %s", "lsmod", self.node, exc)
-            return
-
-        try:
-            self.save_output(
-                "modinfo_all",
-                "for name in $(lsmod | awk '{print $1}') ; do modinfo $name ; echo '-----' ; done",
-                "txt")
-        except Exception as exc:
-            logger.warning("Failed to list kernel modules info: %r on node %s: %s", "modinfo **", self.node, exc)
-        return
-
-    def collect_common_features(self):
-        for path_offset, frmt, cmd in self.node_commands:
-            try:
-                self.save_output(path_offset, cmd, frmt=frmt)
-            except Exception as exc:
-                logger.warning("Failed to run %r on node %s: %s", cmd, self.node, exc)
-
-    def collect_files(self):
-        for fpath in self.node_files:
-            try:
-                self.save_file(os.path.basename(fpath), fpath)
-            except Exception as exc:
-                logger.warning("Failed to download file %r from node %s: %s", fpath, self.node, exc)
-
-        for name, fpath in self.node_renamed_files:
-            try:
-                self.save_file(name, fpath)
-            except Exception as exc:
-                logger.warning("Failed to download file %r from node %s: %s", fpath, self.node, exc)
-
-    def collect_bonds_info(self):
-        # collect_bonds_info
-        bondmap = {}
-        if self.node.exists("/proc/net/bonding"):
-            for fname in self.node.listdir("/proc/net/bonding"):
-                self.save_file("bond_" + fname, "/proc/net/bonding/" + fname)
-                bondmap[fname] = "bond_" + fname
-        self.save("bonds", 'json', 0, json.dumps(bondmap))
-
-    def collect_packages(self):
-        try:
-            if self.node.exists("/etc/debian_version"):
-                self.save_output("packages_deb", "dpkg -l", frmt="txt")
-            else:
-                self.save_output("packages_rpm", "yum list installed", frmt="txt")
-        except Exception as exc:
-            logger.warning("Failed to download packages information from node %s: %s", self.node, exc)
-
-    def collect_block_devs(self) -> None:
-        assert isinstance(self.node, Node)
-
-        bdevs_info = self.node.rpc.sensors.get_block_devs_info()
-        bdevs_info = {name.decode('utf8'): data for name, data in bdevs_info.items()}
-        for name_prefix in ['loop']:
-            for name in bdevs_info:
-                if name.startswith(name_prefix):
-                    del bdevs_info[name]
-
-        hdparm_exists, smartctl_exists, nvme_exists = self.node.rpc.fs.binarys_exists(['hdparm', 'smartctl', 'nvme'])   
-
-        missing = []
-        if not hdparm_exists:
-            missing.append('hdparm')
-
-        if not smartctl_exists:
-            missing.append('smartctl-tools')
-
-        if not nvme_exists:
-            missing.append('nvme-tools')
-        else:
-            code, _, out = self.node.run('nvme version')
-            if code != 0:
-                ver = 0  # type: float
-            else:
-                try:
-                    *_, version = out.split()
-                    ver = float(version)
-                except:
-                    ver = 0
-
-            if ver < 1.0:
-                logger.warning("Nvme tool too old %s, at least 1.0 version is required", ver)
-            else:
-                out_t = self.save_output('nvme_list', 'nvme list -o json', frmt='json')
-                if out_t is not None:
-                    code, out = out_t
-                    if code == 0:
-                        try:
-                            for dev in json.loads(out)['Devices']:
-                                name = os.path.basename(dev['DevicePath'])
-                                self.save_output('block_devs/{}/nvme_smart_log'.format(name),
-                                                 'nvme smart-log {} -o json'.format(dev['DevicePath']), frmt='json')
-                        except:
-                            logging.warning("Failed to process nvme list output")
-
-        if missing:
-            logger.warning("%s is not installed on %s", ",".join(missing), self.node.name)
-
-        out_t = self.save_output("lsblkjs", "lsblk -O -b -J", frmt="json")
-        if out_t:
-            code, out_js = out_t
-            if code == 0:
-                for dev_node in json.loads(out_js)['blockdevices']:
-                    name = dev_node['name']
-                    with self.chdir('block_devs/' + name):
-                        if hdparm_exists:
-                            self.save_output('hdparm', "sudo hdparm -I /dev/" + name)
-
-                        if smartctl_exists:
-                            self.save_output('smartctl', "sudo smartctl -a /dev/" + name)
-
-    def collect_interfaces_info(self) -> None:
-        interfaces = {}
-        for is_phy, dev in get_host_interfaces(self.node):
-            interface = {'dev': dev, 'is_phy': is_phy}
-            interfaces[dev] = interface
-
-            if is_phy:
-                code, _, eth_out = self.node.run("ethtool " + dev)
-                if code == 0:
-                    interface['ethtool'] = eth_out
-
-                code, _, iwconfig_out = self.node.run("iwconfig " + dev)
-                if code == 0:
-                    interface['iwconfig'] = iwconfig_out
-
-        self.save('interfaces', 'json', 0, json.dumps(interfaces))
+def get_file_path(fname: str) -> str:
+    return os.path.join(base_files_path, fname)
 
 
 # ------------------------  Collect coordinator functions --------------------------------------------------------------
 
 
-ALL_COLLECTORS = [CephDataCollector, NodeCollector]  # type: List[Type[Collector]]
+ALL_COLLECTORS: List[Type[Collector]] = [CephDataCollector, NodeCollector]
+ALL_COLLECTORS_MAP: Dict[str, Type[Collector]] = {collector.name: collector for collector in ALL_COLLECTORS}
 
-ALL_COLLECTORS_MAP = dict((collector.name, collector)
-                          for collector in ALL_COLLECTORS)  # type: Dict[str, Type[Collector]]
+CollectorsGenerator = Iterator[Tuple[Callable[[], Coroutine[Any, Any, None]], INode]]
 
 
 class ReportFailed(RuntimeError):
     pass
 
 
+@dataclass
+class ExceptionWithNode(Exception):
+    exc: Exception
+    node: INode
+
+
 class CollectorCoordinator:
-    def __init__(self, storage: IStorageNNP, inventory: Optional[str], opts: Any, executor: Executor) -> None:
-        self.nodes = []  # type: List[Node]
+    def __init__(self, storage: IStorageNNP, inventory: Optional[str], opts: Any, api_key: str,
+                 certificates: Dict[str, Any]) -> None:
+        self.nodes: List[Node] = []
         self.opts = opts
-        self.executor = executor
         self.storage = storage
         self.inventory = inventory
+        self.api_key = api_key
+        self.ceph_master_node: Optional[INode] = None
+        self.nodes: List[Node] = []
+        self.certificates = certificates
 
-        self.ssh_opts = "-o LogLevel=quiet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null " + \
-            "-o ConnectTimeout={} -o ConnectionAttempts=2".format(opts.ssh_conn_timeout)
+    async def connect_and_init(self, ips_or_hostnames: List[str]) -> Tuple[List[Node], List[Tuple[str, str]]]:
+        return await init_rpc_and_fill_data(ips_or_hostnames, access_key=self.api_key,
+                                            certificates=self.certificates)
 
-        if opts.ssh_user:
-            self.ssh_opts += " -l {0} ".format(opts.ssh_user)
-
-        if opts.ssh_opts:
-            self.ssh_opts += opts.ssh_opts + " "
-
-        self.ceph_master_node = None  # type: Optional[INode]
-        self.nodes = []  # type: List[Node]
-
-    def connect_and_init(self, ips_or_hostnames: List[str]) -> Tuple[List[Node], List[Tuple[str, str]]]:
-        return init_rpc_and_fill_data(ips_or_hostnames, ssh_opts=self.ssh_opts,
-                                      with_sudo=not self.opts.no_sudo, executor=self.executor)
-
-    def get_master_node(self) -> Optional[INode]:
+    async def get_master_node(self) -> Optional[INode]:
         if self.opts.ceph_master:
-            logger.info("Connecting to ceph-master: {}".format(self.opts.ceph_master))
-            nodes, err = self.connect_and_init([self.opts.ceph_master])
+            logger.info(f"Connecting to ceph-master: {self.opts.ceph_master}")
+            nodes, err = await self.connect_and_init([self.opts.ceph_master])
             assert len(nodes) + len(err) == 1
             if err:
-                logger.error("Can't connect to ceph-master {}: {}".format(self.opts.ceph_master, err[0]))
+                logger.error(f"Can't connect to ceph-master {self.opts.ceph_master}: {err[0]}")
                 return None
             return nodes[0]
         else:
             return Local()
 
     def fill_ceph_services(self, nodes: List[Node], ceph_services: CephServices) -> Set[str]:
-        all_nodes_ips = {}  # type: Dict[str, Node]
+        all_nodes_ips: Dict[str, Node] = {}
         for node in nodes:
             all_nodes_ips.update({ip: node for ip in node.all_ips})
 
@@ -1030,23 +103,23 @@ class CollectorCoordinator:
 
         return missing_ceph_ips
 
-    def connect_to_nodes(self) -> List[Node]:
+    async def connect_to_nodes(self) -> List[Node]:
 
-        self.ceph_master_node = self.get_master_node()
+        self.ceph_master_node = await self.get_master_node()
         if self.ceph_master_node is None:
             raise ReportFailed()
 
-        if self.ceph_master_node.run('which ceph').code != 0:
+        if (await self.ceph_master_node.run('which ceph')).returncode != 0:
             logger.error("No 'ceph' command available on master node.")
             raise ReportFailed()
 
         ceph_services = None if self.opts.ceph_master_only \
-                        else discover_ceph_services(self.ceph_master_node, self.opts, thcount=self.opts.pool_size)
+                        else await discover_ceph_services(self.ceph_master_node, self.opts)
 
-        nodes, errs = self.connect_and_init(list(iter_extra_host(self.inventory)))
+        nodes, errs = await self.connect_and_init(list(iter_extra_host(self.inventory)))
         if errs:
             for ip_or_hostname, err in errs:
-                logging.error("Can't connect to extra node %s: %s", ip_or_hostname, err)
+                logging.error(f"Can't connect to extra node {ip_or_hostname}: {err}")
             raise ReportFailed()
 
         # add information from monmap and osdmap about ceph services and connect to extra nodes
@@ -1054,12 +127,12 @@ class CollectorCoordinator:
 
             missing_ceph_ips = self.fill_ceph_services(nodes, ceph_services)
 
-            ceph_nodes, errs = self.connect_and_init(list(missing_ceph_ips))
+            ceph_nodes, errs = await self.connect_and_init(list(missing_ceph_ips))
             if errs:
                 lfunc = logging.error if self.opts.all_ceph else logging.warning
                 lfunc("Can't connect to ceph nodes")
                 for ip, err in errs:
-                    lfunc("    %s => %s", ip, err)
+                    lfunc(f"    {ip} => {err}")
 
                 if self.opts.all_ceph:
                     raise ReportFailed()
@@ -1074,14 +147,14 @@ class CollectorCoordinator:
 
         logger.info("Found %s nodes with osds", sum(1 for node in nodes if node.osds))
         logger.info("Found %s nodes with mons", sum(1 for node in nodes if node.mon))
-        logger.info("Run with %s hosts in total", len(nodes))
+        logger.info(f"Run with {len(nodes)} hosts in total")
 
         for node in nodes:
-            logger.debug("Node: %s", node.ceph_info())
+            logger.debug(f"Node: {node.ceph_info()}")
 
         return nodes
 
-    def collect_ceph_data(self) -> Iterator[Tuple[Callable, INode]]:
+    def collect_ceph_data(self) -> CollectorsGenerator:
         assert self.ceph_master_node is not None
         yield CephDataCollector(self.storage,
                                 self.opts,
@@ -1092,77 +165,68 @@ class CollectorCoordinator:
             for node in self.nodes:
                 if node.mon:
                     collector = CephDataCollector(self.storage,
-                                              self.opts,
-                                              node,
-                                              pretty_json=not self.opts.no_pretty_json)
+                                                  self.opts,
+                                                  node,
+                                                  pretty_json=not self.opts.no_pretty_json)
 
                     yield collector.collect_monitor, node
 
                 if node.osds:
                     collector = CephDataCollector(self.storage,
-                                              self.opts,
-                                              node,
-                                              pretty_json=not self.opts.no_pretty_json)
+                                                  self.opts,
+                                                  node,
+                                                  pretty_json=not self.opts.no_pretty_json)
                     yield collector.collect_osd, node
 
-    def collect_node_data(self) -> Iterator[Callable]:
+    def collect_node_data(self) -> CollectorsGenerator:
         for node in self.nodes:
             yield NodeCollector(self.storage,
                                 self.opts,
                                 node,
                                 pretty_json=not self.opts.no_pretty_json).collect, node
 
-    def collect(self):
+    async def collect(self):
         # This variable is updated from main function
-        self.nodes = self.connect_to_nodes()
+        self.nodes = await self.connect_to_nodes()
+        assert self.ceph_master_node is not None
         if self.opts.detect_only:
             return
 
         self.storage.put_raw(json.dumps([node.dct() for node in self.nodes]).encode('utf8'), "hosts.json")
 
+        async def raise_with_node(func, node: INode):
+            try:
+                await func()
+            except Exception as exc:
+                raise ExceptionWithNode(exc, node) from exc
+
+        all_coros = list(self.collect_ceph_data()) + list(self.collect_node_data())
         try:
-            for func in [self.collect_ceph_data, self.collect_node_data]:
-                futures = {}  # type: Dict[Any, INode]
-                for run_func, node in func():
-                    futures[self.executor.submit(run_func)] = node
-
-                for future, node in futures.items():
-                    try:
-                        future.result()
-                    except Exception as exc:
-                        exc.node = node
-                        raise
-
+            await asyncio.gather(*(raise_with_node(func, node) for func, node in all_coros), return_exceptions=False)
+        except ExceptionWithNode as exc:
+            logger.error(f"Exception happened during collecting from node {exc.node} (see full tb below): {exc.exc}")
+            raise
         except Exception as exc:
-            if getattr(exc, 'node') is not None:
-                logger.error("Exception happened during collecting from node %s (see full tb below): %s", exc.node, exc)
-            else:
-                logger.error("Exception happened(see full tb below): %s", exc)
+            logger.error(f"Exception happened(see full tb below): {exc}")
             raise
         finally:
             logger.info("Collecting logs and teardown RPC servers")
             for node in self.nodes + [self.ceph_master_node]:
-                if isinstance(node, Node):
-                    try:
-                        self.storage.put_raw(
-                            node.rpc.server.get_logs().encode('utf8'),
-                            "rpc_logs/{0}.txt".format(node.name))
-                    except Exception:
-                        pass
-                    try:
-                        node.rpc.server.stop()
-                    except ConnectionClosed:
-                        node.rpc = None
+                try:
+                    self.storage.put_raw((await node.rpc.sys.get_logs()).encode('utf8'),
+                                         f"rpc_logs/{node.name}.txt")
+                except Exception:
+                    pass
 
-        logger.info("Totally collected data from %s nodes", len(self.nodes))
+        logger.info(f"Totally collected data from {len(self.nodes)} nodes")
 
         for node in sorted(self.nodes, key=lambda x: x.name):
             if node.osds and node.mon:
-                logger.info("Node %s has mon and %s osds", node.name, len(node.osds))
+                logger.info(f"Node {node.name} has mon and {len(node.osds)} osds")
             elif node.osds:
-                logger.info("Node %s has %s osds", node.name, len(node.osds))
+                logger.info(f"Node {node.name} has {len(node.osds)} osds")
             elif node.mon:
-                logger.info("Node %s has mon", node.name)
+                logger.info(f"Node {node.name} has mon")
 
         logger.info("Totally found %s monitors, %s OSD nodes with %s OSD daemons",
                     sum(1 for node in self.nodes if node.mon),
@@ -1174,21 +238,30 @@ def encrypt_and_upload(url: str,
                        report_file: str,
                        key_file: str,
                        web_cert_file: str,
-                       http_user_password: str):
+                       http_user_password: str,
+                       timeout: int = 360):
     fd, enc_report = tempfile.mkstemp(prefix="ceph_report_", suffix=".enc")
     os.close(fd)
     cmd = ["bash", get_file_path("upload.sh"), report_file, enc_report, key_file, web_cert_file, url]
 
     try:
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
-        stdout, stderr = proc.communicate((http_user_password + "\n").encode("utf8"))
+        proc = subprocess.run(cmd,
+                              stdin=subprocess.PIPE,
+                              stderr=subprocess.STDOUT,
+                              stdout=subprocess.PIPE,
+                              input=(http_user_password + "\n").encode("utf8"),
+                              timeout=timeout)
+    except subprocess.TimeoutExpired:
+        logger.error(f"Fail to upload data: upload timeout")
+        raise ReportFailed()
+
     finally:
         if os.path.exists(enc_report):
             os.unlink(enc_report)
 
     if proc.returncode != 0:
-        logger.error("Fail to upload data: %s", stdout.decode("utf8").strip())
-        raise subprocess.CalledProcessError(cmd=" ".join(cmd), returncode=proc.returncode, output=stdout)
+        logger.error(f"Fail to upload data: {proc.stdout.decode('utf8').strip()}")
+        raise ReportFailed()
 
     logger.info("File successfully uploaded")
 
@@ -1219,27 +292,27 @@ def setup_logging(log_level: str, log_config_file: str, out_folder: Optional[str
 
 
 def pack_output_folder(out_folder: str, out_file: str):
-    code, _, res = Local().run("cd {} ; tar -zcvf {} *".format(out_folder, out_file), timeout=None)
-    if code != 0:
-        logger.error("Fail to archive results. Please found raw data at %r", out_folder)
+    tar_res = subprocess.run(f"cd {out_folder} ; tar -zcvf {out_file} *")
+    if tar_res.returncode != 0:
+        logger.error(f"Fail to archive results. Please found raw data at {out_folder!r}")
     else:
-        logger.info("Result saved into %r", out_file)
+        logger.info(f"Result saved into {out_file!r}")
 
 
-def check_and_prepare_paths(opts: Any) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+def check_and_prepare_paths(opts: Any) -> Tuple[str, Optional[str], Optional[str]]:
     inv_path = os.path.join(opts.base_folder, opts.inventory) if opts.inventory else None
 
     # verify options
     if inv_path and not os.path.isfile(inv_path):
-        print("--inventory value must be file ", repr(opts.inventory), file=sys.stderr)
-        exit(1)
+        print(f"--inventory value must be file {opts.inventory!r}", file=sys.stderr)
+        raise ReportFailed(f"--inventory value must be file {opts.inventory!r}")
 
-    ctime = "{:%Y_%h_%d.%H_%M}".format(datetime.datetime.now())
-    folder_name = "ceph_report.{}.{}.{}".format(opts.customer, opts.cluster, ctime)
-    arch_name = "ceph_report.{}.{}.{}.tar.gz".format(opts.customer, opts.cluster, ctime)
+    ctime = f"{datetime.datetime.now():%Y_%h_%d.%H_%M}"
+    folder_name = f"ceph_report.{opts.customer}.{opts.cluster}.{ctime}"
+    arch_name = f"ceph_report.{opts.customer}.{opts.cluster}.{ctime}.tar.gz"
 
-    output_folder = os.path.join(opts.base_folder, opts.output_folder, folder_name)
-    output_arch = os.path.join(opts.base_folder, opts.output_folder, arch_name)
+    output_folder: Optional[str] = os.path.join(opts.base_folder, opts.output_folder, folder_name)
+    output_arch: Optional[str] = os.path.join(opts.base_folder, opts.output_folder, arch_name)
 
     if opts.detect_only:
         output_arch = None
@@ -1251,9 +324,9 @@ def check_and_prepare_paths(opts: Any) -> Tuple[Optional[str], Optional[str], Op
         if os.path.exists(output_folder):
             if opts.wipe:
                 shutil.rmtree(output_folder)
-                os.mkdir(output_folder)
+                os.makedirs(output_folder, exist_ok=True)
         else:
-            os.mkdir(output_folder)
+            os.makedirs(output_folder, exist_ok=True)
 
     return inv_path, output_folder, output_arch
 
@@ -1271,7 +344,6 @@ def parse_args(argv: List[str]) -> Any:
     collect.add_argument("--cluster", help="Cluster name, should match [a-zA-Z_0-9-]+", required=True)
     collect.add_argument("--customer", help="Customer name, should match [a-zA-Z_0-9-]+", required=True)
     collect.add_argument("--output-folder", help="Folder to put result to", default="/tmp")
-    collect.add_argument("--no-sudo", action="store_true", help="Don't run agent with sudo on remote nodes")
     collect.add_argument("--base-folder", default=".", help="Base folder for all paths")
 
     # collection flags
@@ -1289,12 +361,10 @@ def parse_args(argv: List[str]) -> Any:
     collect.add_argument("--must-connect-to-all", action="store_true",
                          help="Must successfully connect to all ceph nodes")
 
-    collect.add_argument("--pool-size", default=32, type=int, help="RPC/local worker pool size")
-    collect.add_argument("--ssh-opts", help="SSH cli options")
-    collect.add_argument("--ssh-user", help="SSH user. Current user by default")
     collect.add_argument("--wipe", action='store_true', help="Wipe results directory before store data")
-    collect.add_argument("--ssh-conn-timeout", default=60, type=int, help="SSH connection timeout")
     collect.add_argument("--cmd-timeout", default=60, type=int, help="Cmd's run timeout")
+    collect.add_argument("--api-key", default=None, help="RPC api key file path")
+    collect.add_argument("--certs-folder", default=None, help="Folder with rpc ssl certificates")
 
     upload = subparsers.add_parser('upload', help='Upload report to server')
     upload.add_argument("--base-folder", default=".", help="Base folder for all paths")
@@ -1314,6 +384,69 @@ def parse_args(argv: List[str]) -> Any:
     return parser.parse_args(argv[1:])
 
 
+def get_api_key(api_key_path: Path) -> str:
+    if not api_key_path.is_file():
+        logger.critical(f"Can't find API key at {api_key_path}")
+        raise ReportFailed(f"Can't find API key at {api_key_path}")
+    return api_key_path.open().read()
+
+
+def get_certificates(certs_folder: Path) -> Dict[str, Path]:
+    certificates: Dict[str, Path] = {}
+
+    if not certs_folder.is_dir():
+        if certs_folder:
+            logger.critical(f"Can't cert folder at {certs_folder}")
+            raise ReportFailed(f"Can't cert folder at {certs_folder}")
+        else:
+            logger.warning(f"Can't cert folder at {certs_folder}")
+
+    for file in certs_folder.glob('agent_server.*.cert'):
+        node_name = file.name.split(".", 1)[1].rsplit(".", 1)[0]
+        certificates[node_name] = file
+
+    return certificates
+
+
+def collect(opts: Any, inv_path: Optional[str], output_folder: Optional[str], output_arch: Optional[str]):
+    if output_folder:
+        if opts.dont_pack_result:
+            logger.info("Store data into %r", output_folder)
+        else:
+            logger.info("Will store results into %s", output_arch)
+            logger.info("Temporary folder %r", output_folder)
+        storage = make_storage(output_folder, existing=False, serializer='raw')
+    else:
+        storage = None
+
+    api_key_path = Path(AGENT_PATH) / 'agent_client_keys/agent_api.key' \
+                   if opts.api_key is None else\
+                   Path(opts.api_key)
+
+    api_key = get_api_key(api_key_path)
+
+    certificates_path = (Path(AGENT_PATH) / 'agent_client_keys') \
+                        if opts.certs_folder is None \
+                        else Path(opts.certs_folder)
+
+    certificates = get_certificates(certificates_path)
+
+    # run collect
+    asyncio.run(CollectorCoordinator(storage, opts=opts, inventory=inv_path, api_key=api_key,
+                                     certificates=certificates).collect())
+
+    # compress/commit output folder
+    if output_folder:
+        if opts.dont_pack_result:
+            logger.warning("Unpacked tree is kept as --dont-pack-result option is set, so no archive created")
+            print("Result stored into", output_folder)
+        else:
+            assert output_arch is not None
+            pack_output_folder(output_folder, output_arch)
+            print("Result saved into", output_arch)
+            shutil.rmtree(output_folder)
+
+
 def main(argv: List[str]) -> int:
     opts = parse_args(argv)
     log_config = get_file_path("logging.json")
@@ -1331,29 +464,9 @@ def main(argv: List[str]) -> int:
             inv_path, output_folder, output_arch = check_and_prepare_paths(opts)
             setup_logging(opts.log_level, log_config, output_folder, opts.persistent_log)
             logger.info(repr(argv))
-            if output_folder:
-                if opts.dont_pack_result:
-                    logger.info("Store data into %r", output_folder)
-                else:
-                    logger.info("Will store results into %s", output_arch)
-                    logger.info("Temporary folder %r", output_folder)
-                storage = make_storage(output_folder, existing=False, serializer='raw')
-            else:
-                storage = None
 
-            # run collect
-            with ThreadPoolExecutor(opts.pool_size) as executor:
-                CollectorCoordinator(storage, opts=opts, inventory=inv_path, executor=executor).collect()
+            collect(opts, inv_path, output_folder, output_arch)
 
-            # compress/commit output folder
-            if output_folder:
-                if opts.dont_pack_result:
-                    logger.warning("Unpacked tree is kept as --dont-pack-result option is set, so no archive created")
-                    print("Result stored into", output_folder)
-                else:
-                    pack_output_folder(output_folder, output_arch)
-                    print("Result saved into", output_arch)
-                    shutil.rmtree(output_folder)
         except ReportFailed:
             return 1
         except Exception:

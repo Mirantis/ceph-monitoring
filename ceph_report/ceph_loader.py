@@ -19,7 +19,7 @@ from .cluster_classes import (PGDump, PG, PGStatSum, PGId, PGState, StatusRegion
                               Pool, PoolDF, CephVersion, CephMonitor, MonRole, CephStatus, CephStatusCode,
                               Host, CephInfo, CephOSD, OSDStatus, CephVersions, FileStoreInfo, BlueStoreInfo,
                               OSDProcessInfo, CephDevInfo, OSDPGStats)
-from .collect_info import parse_proc_file
+from .collect_utils import parse_proc_file
 
 
 logger = logging.getLogger("cephlib.parse")
@@ -289,18 +289,6 @@ def load_pools(storage: TypedStorage, ver: CephVersions) -> Dict[int, Pool]:
     return pools
 
 
-ERR_MAP = {
-    0: "HEALTH_OK",
-    1: "SCRUB_MISSMATCH",
-    2: "CLOCK_SKEW",
-    3: "OSD_DOWN",
-    4: "REDUCED_AVAIL",
-    5: "DEGRADED",
-    6: "NO_ACTIVE_MGR",
-    7: "SLOW_REQUESTS",
-    8: "MON_ELECTION"
-}
-
 
 class CephLoader:
     def __init__(self,
@@ -320,17 +308,15 @@ class CephLoader:
 
         errors_count = None
         status_regions = None
+        err_wrn: Optional[List[str]] = None
 
         for is_file, mon in self.storage.txt.mon:
             if not is_file:
-                err_wrn: List[str] = self.storage.txt.mon[f"{mon}/ceph_log_wrn_err"].split("\n")
+                err_wrn = self.storage.txt.mon[f"{mon}/ceph_log_wrn_err"].split("\n")
                 try:
-                    log_count_dct = self.storage.json.mon[f"{mon}/log_issues_count"]
+                    errors_count = self.storage.json.mon[f"{mon}/log_issues_count"]
                 except KeyError:
-                    log_count_dct = None
-
-                if log_count_dct:
-                    errors_count = {ERR_MAP[int(err_id)]: cnt for err_id, cnt in log_count_dct.items()}
+                    pass
 
                 try:
                     status_regions = [StatusRegion(*dt) for dt in self.storage.json.mon[f"{mon}/status_regions"]]

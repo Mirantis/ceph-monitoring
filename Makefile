@@ -1,12 +1,14 @@
-.PHONY: mypy pylint pylint_e prepare archive archive_local
+.PHONY: mypy pylint pylint_e prepare archive archive_local mypy_collect
 
 ALL_FILES=$(shell find ceph_report/ -type f -name '*.py')
-# ALL_FILES=ceph_report/collect_info.py
-# ALL_FILES=ceph_report/visualize_cluster.py ceph_report/resource_usage.py ceph_report/osd_ops.py ceph_report/hw_info.py ceph_report/cluster.py
+COLLECT_FILES=$(shell find ceph_report/ -type f -name 'collect*.py')
 STUBS="/home/koder/workspace/typeshed"
 
 mypy:
 		MYPYPATH=${STUBS} python -m mypy --ignore-missing-imports --follow-imports=skip ${ALL_FILES}
+
+mypy_collect:
+		MYPYPATH=${STUBS} python -m mypy --ignore-missing-imports --follow-imports=skip ${COLLECT_FILES}
 
 PYLINT_FMT=--msg-template={path}:{line}: [{msg_id}({symbol}), {obj}] {msg}
 
