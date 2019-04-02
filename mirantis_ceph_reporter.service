@@ -1,0 +1,28 @@
+[Unit]
+Description=Mirantis ceph reporter service
+
+[Service]
+WorkingDirectory=/opt/mirantis/ceph_report
+Environment=PYTHONUNBUFFERED=1
+Type=simple
+ExecStart=/usr/bin/python3.5 /opt/mirantis/ceph_report/ceph_report/run_service.py \
+    --agent /opt/mirantis/agent \
+    --reporter /opt/mirantis/ceph_report \
+    --report-every 3600 \
+    --report-timeout 600 \
+    --uploadt-timeout 1200 \
+    -- \
+    --inventory {INVENTORY_FILE} \
+    --ceph-master {MASTER_NODE} \
+    --output-folder /var/ceph_reports \
+    --log-level DEBUG \
+    --persistent-log \
+    --cluster {CLUSTER} \
+    --customer {CUSTOMER} \
+    -- \
+    --url {UPLOAD_URL} \
+    --http-creds {HTTP_CREDS}
+StandardOutput=null
+
+[Install]
+WantedBy=multi-user.target
