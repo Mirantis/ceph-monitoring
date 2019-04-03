@@ -1,5 +1,3 @@
-import asyncio
-
 from typing import List, Tuple, Dict, Sequence
 from urllib.parse import urljoin
 
@@ -20,8 +18,6 @@ async def query_dev_metric(url: str,
 
     if offset_minutes != 0:
         query += " offset {}m".format(offset_minutes)
-
-    print(query)
 
     async with aiohttp.ClientSession() as sess:
         async with sess.get(urljoin(url, "/api/v1/query"), params={'query': query}) as resp:
@@ -54,12 +50,14 @@ async def get_block_devs_loads(url: str, hosts: List[str], range_minutes: int,
         "diskio_write_time",
         "diskio_writes"
     ]
+
     for metric in metrics:
-        res[metric] =await query_dev_metric(url, name="diskio_io_time",
-                                            hosts=hosts, devs=devs, range_minutes=range_minutes)
+        res[metric] = await query_dev_metric(url, name="diskio_io_time",
+                                             hosts=hosts, devs=devs, range_minutes=range_minutes)
     return res
 
 
+# import asyncio
 # loop = asyncio.get_event_loop()
 # vals = loop.run_until_complete(get_block_devs_loads("http://mon01:15010",
 #                                                     hosts=["osd[0-9]+"],

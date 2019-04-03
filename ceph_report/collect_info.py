@@ -1,4 +1,5 @@
 import os
+import struct
 import sys
 import json
 import shutil
@@ -21,6 +22,7 @@ from .collect_node_classes import INode, Node, Local
 from .collectors import Collector, CephDataCollector, NodeCollector, LUMINOUS_MAX_PG, DEFAULT_MAX_PG, AUTOPG
 from .collect_utils import init_rpc_and_fill_data, CephServices, discover_ceph_services
 from .utils import CLIENT_NAME_RE, CLUSTER_NAME_RE, re_checker, read_inventory, get_file, setup_logging
+from .prom_query import get_block_devs_loads
 
 
 logger = logging.getLogger('collect')
@@ -45,7 +47,9 @@ class ExceptionWithNode(Exception):
 
 
 class CollectorCoordinator:
-    def __init__(self, storage: IStorageNNP, inventory: Optional[str], opts: Any, api_key: str,
+    def __init__(self,
+                 storage: IStorageNNP,
+                 inventory: List[str], opts: Any, api_key: str,
                  certificates: Dict[str, Any]) -> None:
         self.nodes: List[Node] = []
         self.opts = opts
@@ -98,14 +102,13 @@ class CollectorCoordinator:
 
     async def connect_to_nodes(self) -> List[Node]:
 
-        inventory = list(read_inventory(self.inventory))
-        nodes, errs = await self.connect_and_init(inventory)
+        nodes, errs = await self.connect_and_init(self.inventory)
         if errs:
             for ip_or_hostname, err in errs:
                 logger.error(f"Can't connect to extra node {ip_or_hostname}: {err}")
             raise ReportFailed()
 
-        fnodes = [node for node in nodes if node.conn_endpoint == inventory[0]]
+        fnodes = [node for node in nodes if node.conn_endpoint == self.inventory[0]]
         if len(fnodes) != 1:
             logger.error(f"Inventory empty or has duplicated nodes")
             raise ReportFailed()
@@ -332,6 +335,18 @@ def get_certificates(certs_folder: Path) -> Dict[str, Path]:
     return certificates
 
 
+async def collect_prom(prom_url: str, inventory: List[str], target: Path, time_range_hours: int):
+    data = await get_block_devs_loads(prom_url, inventory, time_range_hours * 60)
+
+    # data is {metric: str => {(host: str, device: str) => [values: float]}}
+
+    for metric, values in data.items():
+        for (host, device), measurements in values.items():
+            with (target / 'monitoring' / f"{metric}@{device}@{host}.bin").open("wb") as fd:
+                if measurements:
+                    fd.write(struct.pack('!%sd' % len(measurements), *measurements))
+
+
 def collect(opts: Any, inv_path: Optional[str], output_folder: Optional[str], output_arch: Optional[str]):
     if output_folder:
         if opts.dont_pack_result:
@@ -348,9 +363,17 @@ def collect(opts: Any, inv_path: Optional[str], output_folder: Optional[str], ou
     certificates_path = Path(opts.certs_folder)
     certificates = get_certificates(certificates_path)
 
+    inventory = list(read_inventory(inv_path))
+
     # run collect
-    asyncio.run(CollectorCoordinator(storage, opts=opts, inventory=inv_path, api_key=api_key,
+    asyncio.run(CollectorCoordinator(storage,
+                                     opts=opts,
+                                     inventory=inventory,
+                                     api_key=api_key,
                                      certificates=certificates).collect())
+
+    if output_folder and opts.prometheus:
+        asyncio.run(collect_prom(opts.prometheus, inventory, Path(output_folder), opts.prometheus_interval))
 
     # compress/commit output folder
     if output_folder:
@@ -408,6 +431,10 @@ def parse_args(argv: List[str]) -> Any:
                                 help="RPC api key file path (%(default)s)")
     collect_parser.add_argument("--certs-folder", default=str(default_certs_folder),
                                 help="Folder with rpc ssl certificates (%(default)s)")
+
+    collect_parser.add_argument("--prometheus", default=None, help="Prometheus url to collect data")
+    collect_parser.add_argument("--prometheus-interval", default=24 * 7, type=int,
+                                help="For how many hours to the past grab data from prometheus")
 
     upload = subparsers.add_parser('upload', help='Upload report to server')
     upload.add_argument("--base-folder", default=".", help="Base folder for all paths")

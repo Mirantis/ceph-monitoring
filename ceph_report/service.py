@@ -8,7 +8,10 @@ from pathlib import Path
 import configparser
 import logging
 import logging.config
-from typing import List, Dict, Any
+from typing import List, Any
+
+from .collect_from_cfg import to_args
+
 
 logger = logging.getLogger("service")
 DONT_UPLOAD = 'dont_upload'
@@ -19,19 +22,6 @@ def parse_args(argv: List[str]) -> Any:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("config", default="/etc/mirantis/ceph_report.cfg", help="Config file path  (%(default)s)")
     return parser.parse_args(argv[1:])
-
-
-def to_args(section: Dict[str, str]) -> List[str]:
-    res = []
-    for key, val in section.items():
-        if val in ('true', 'True', True, 'yes'):
-            res.append('--' + key.replace("_", '-'))
-        elif val in  ('false', 'False', False, 'no'):
-            pass
-        else:
-            res.append('--' + key.replace("_", '-'))
-            res.append(str(val))
-    return res
 
 
 def main(argv: List[str]):
@@ -47,12 +37,7 @@ def main(argv: List[str]):
     report_every = int(svc_config['report_every'])
     upload_timeout = int(svc_config['upload_timeout'])
     report_timeout = int(svc_config['report_timeout'])
-    agent_path = Path(svc_config['agent'])
 
-    cert_folder = agent_path / 'agent_client_keys'
-
-    collect_args = ["--api-key", str(cert_folder / "agent_api.key"),
-                    "--certs-folder", str(cert_folder)] + to_args(cfg['collect'])
     upload_args = to_args(cfg['upload'])
 
     next_time = time.time()
@@ -62,11 +47,8 @@ def main(argv: List[str]):
         time.sleep(sleep_time if sleep_time > 0 else 0)
         next_time += report_every
         try:
-            cmd = [sys.executable, "-m", "ceph_report.collect_info", "collect", *collect_args]
+            cmd = [sys.executable, '-m', 'ceph_report.collect_from_cfg']
             logger.info(f"Started collecting with {cmd}, timeout={report_timeout}")
-
-            import os
-            print(os.environ['PYTHONPATH'])
 
             res = subprocess.run(cmd, timeout=report_timeout, stdout=subprocess.PIPE)
 

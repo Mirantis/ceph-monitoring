@@ -48,8 +48,7 @@ def parse_args(argv: List[str]) -> Any:
     install_parser.add_argument("--dont-start", action='store_true', default=False, help="Don't start service")
     install_parser.add_argument("--dont-enable", action='store_true', default=False,
                                 help="Don't enable auto start on boot")
-
-    sub_parsers.add_parser("uninstall")
+    install_parser.add_argument("--prometeus-url", default=None, help="Prometheus URL to pull data")
 
     return parser.parse_args(argv[1:])
 
