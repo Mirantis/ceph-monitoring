@@ -7,23 +7,42 @@ import json
 import os
 import sys
 from pathlib import Path
-
+from typing import Optional, Dict, Any
 
 logger = logging.getLogger("run")
-base_files_path = Path(sys.argv[0]).parent
+
+
+def load_config(path: Path) -> Optional[Dict[str, Any]]:
+    if path.exists():
+        cfg = configparser.ConfigParser()
+        cfg.read(str(path))
+        if cfg.has_section("run"):
+            return cfg["run"]
+    return None
 
 
 def parse_args(argv):
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--reporter",
-                        default=str(base_files_path.parent),
-                        help="Path to reporter installation (%(default)s)")
-    parser.add_argument("--agent",
-                        default=str(base_files_path.parent.parent / 'agent'),
-                        help="Path to agent installation (%(default)s)")
-    parser.add_argument("--config",
-                        default="/etc/mirantis/ceph_report.cfg",
-                        help="Path config file (%(default)s)")
+    default_config_path = "/etc/mirantis/ceph_report.cfg"
+    def_cfg = load_config(Path(default_config_path))
+
+    pythonhome = def_cfg.get("pythonhome") if def_cfg else None
+    pythonpath = def_cfg.get("pythonpath").split(":") if def_cfg else []
+
+    parser = argparse.ArgumentParser()
+
+    if pythonhome:
+        parser.add_argument("--pythonhome", default=None, metavar="PYTHONHOME",
+                            help="Path to python home ({})".format(pythonhome))
+    else:
+        parser.add_argument("--pythonhome", required=True, metavar="PYTHONHOME", help="Path to python home")
+
+    parser.add_argument("--pythonpath",
+                        nargs="*",
+                        default=[],
+                        metavar="LIBPATH",
+                        help="Path to extra libs folder ({})".format(pythonpath))
+
+    parser.add_argument("--config", default=default_config_path, help="Path config file (%(default)s)")
     return parser.parse_args(argv[1:])
 
 
@@ -60,54 +79,47 @@ def main(argv):
 
     opts = parse_args(my_args)
 
-    # can't check this in lines above - need to make --help works
-    if not tool_cmd:
-        print("No tool provided. Use [opts] -- [tool opts]")
-        exit(1)
-
-    if Path(opts.config).exists():
-        cfg = configparser.ConfigParser()
-        cfg.read(opts.config)
-        config = cfg['run']
-    else:
-        config = {
-            'agent': opts.agent,
-            'reporter': opts.reporter,
-        }
+    config = load_config(Path(opts.config))
+    if not config:
+        config = {}
 
     log_cfg = json.load(open(config['log_config'])) if 'log_config' in config else default_logging_cfg
     logging.config.dictConfig(log_cfg)
 
-    service_path = Path(opts.reporter)
-    agent_path = Path(opts.agent)
+    # can't check this in lines above - need to make --help works
+    if not tool_cmd:
+        logger.error("No tool opts provided. Use [opts] -- [tool opts]")
+        exit(1)
 
     environ = os.environ.copy()
+    pythonhome = config.get("pythonhome") if opts.pythonhome is None else opts.pythonhome
+
+    if pythonhome is None:
+        logger.error("No pythonhome provided")
+        exit(1)
+
+    pythonbins = list(Path(pythonhome).glob("python3.[789]"))
+    if len(pythonbins) == 0:
+        logger.error("Can't find appropriate python version at %r, only 3.7+ supported", pythonhome)
+        exit(1)
+
+    pythonbin = sorted(str(bin) for bin in pythonbins)[0]
+
+    environ["PYTHONHOME"] = pythonhome
+
     pypath = environ.get("PYTHONPATH", "")
+    pythonpath = config.get("pythonpath", "").split(":") if not opts.pythonpath else opts.pythonpath
+    for lib_dir in pythonpath:
+        if Path(lib_dir).is_dir():
+             pypath += ":" + lib_dir
 
-    for lib_dir in (service_path / 'libs', agent_path / 'libs', agent_path / 'agent'):
-        if lib_dir.is_dir():
-             pypath += ":" + str(lib_dir)
-
-    pypath += ":" + str(service_path)
     environ["PYTHONPATH"] = pypath
 
-    for python_path in (service_path / 'python', agent_path / 'python'):
-        if python_path.is_dir():
-            environ['PYTHONHOME'] = str(python_path)
-            pythonbins = list(python_path.glob("python3.[789]"))
-            assert len(pythonbins) == 1
-            pythonbin = str(pythonbins[0])
-        else:
-            pythonbin = sys.executable
-
-    environ["RPC_AGENT_PATH"] = str(agent_path)
+    logger.info("Starting tool with python=%r PYTHONHOME=%r, PYTHONPATH=%r",
+                 pythonbin, environ.get('PYTHONHOME', ''), environ.get('PYTHONPATH', ''))
 
     cmd = [pythonbin, *tool_cmd]
-    logging.info("Starting tool with PYTHONHOME=%r, PYTHONPATH=%r, RPC_AGENT_PATH=%r",
-                 environ.get('PYTHONHOME', ''),
-                 environ.get('PYTHONPATH', ''),
-                 environ.get('RPC_AGENT_PATH', ''))
-    logging.info("CMD=%s", cmd)
+    logger.info("CMD=%s", cmd)
 
     for handler in logger.handlers:
         handler.flush()

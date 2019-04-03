@@ -14,7 +14,6 @@ from typing import List, Tuple
 
 import matplotlib
 
-
 matplotlib.use('Agg')
 del matplotlib
 
@@ -40,7 +39,8 @@ from .visualize_host_load import show_host_io_load_in_color, show_host_network_l
 from .visualize_osds import show_osd_state, show_osd_info, show_osd_perf_info, show_osd_pool_pg_distribution, \
                             show_osd_pool_agg_pg_distribution, show_osd_proc_info, show_osd_proc_info_agg
 from .plot_data import plot_crush_rules, show_osd_used_space_histo
-from .collect_info import setup_logging, get_file_path
+from .utils import setup_logging, get_file
+
 
 logger = logging.getLogger('report')
 
@@ -153,7 +153,7 @@ def parse_args(argv):
 def main(argv: List[str]):
     opts = parse_args(argv)
     setup_logging(opts.log_level,
-                  log_config_file=get_file_path('logging.json'),
+                  log_config_file=get_file('logging.json'),
                   out_folder=None)
 
     logger.info("Generating report from %r to %r", opts.path, opts.out)

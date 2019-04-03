@@ -1,7 +1,11 @@
+import json
+import os
 import re
 import argparse
 import datetime
+import logging.config
 from enum import Enum
+from pathlib import Path
 from typing import NamedTuple, Dict, Tuple, Callable, Iterator, Optional
 
 
@@ -132,3 +136,35 @@ def read_inventory(path: Optional[str]) -> Iterator[str]:
                     assert ':' not in ln
                     assert len(ln.split()) == 1
                     yield ln
+
+
+FILES_DIRECTORY = Path(__file__).resolve().parent.parent / 'files'
+
+
+def get_file(name: str) -> Path:
+    return FILES_DIRECTORY / name
+
+
+def setup_logging(log_level: str, log_config_file: Path, out_folder: Optional[str], persistent_log: bool = False):
+    log_config = json.load(log_config_file.open())
+    handlers = ["console"]
+
+    if out_folder:
+        handlers.append("log_file")
+        log_file = os.path.join(out_folder, "log.txt")
+        log_config["handlers"]["log_file"]["filename"] = log_file
+    else:
+        del log_config["handlers"]["log_file"]
+
+    if persistent_log:
+        handlers.append("persistent_log_file")
+    else:
+        del log_config["handlers"]["persistent_log_file"]
+
+    if log_level is not None:
+        log_config["handlers"]["console"]["level"] = log_level
+
+    for key in list(log_config['loggers']):
+        log_config['loggers'][key]["handlers"] = handlers
+
+    logging.config.dictConfig(log_config)

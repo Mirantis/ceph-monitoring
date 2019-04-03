@@ -11,26 +11,19 @@ import tempfile
 import subprocess
 import logging.config
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Dict, Any, List, Tuple, Set, Callable, Optional, Type, Iterator, Coroutine
 
-from dataclasses import dataclass
-
+import agent
 from cephlib.storage import make_storage, IStorageNNP
-
-base_files_path = Path(sys.argv[0]).parent
-AGENT_PATH = os.environ.get("RPC_AGENT_PATH", str(base_files_path.parent.parent / 'agent'))
-sys.path.append(AGENT_PATH)
 
 from .collect_node_classes import INode, Node, Local
 from .collectors import Collector, CephDataCollector, NodeCollector, LUMINOUS_MAX_PG, DEFAULT_MAX_PG, AUTOPG
 from .collect_utils import init_rpc_and_fill_data, CephServices, discover_ceph_services
-from .utils import CLIENT_NAME_RE, CLUSTER_NAME_RE, re_checker, read_inventory
+from .utils import CLIENT_NAME_RE, CLUSTER_NAME_RE, re_checker, read_inventory, get_file, setup_logging
+
 
 logger = logging.getLogger('collect')
-
-
-base_files_path = Path(sys.argv[0]).parent / 'files'
-
 
 # ------------------------  Collect coordinator functions --------------------------------------------------------------
 
@@ -250,7 +243,7 @@ def encrypt_and_upload(url: str,
                        timeout: int = 360):
     fd, enc_report = tempfile.mkstemp(prefix="ceph_report_", suffix=".enc")
     os.close(fd)
-    cmd = ["bash", str(base_files_path / "upload.sh"), report_file, enc_report, key_file, web_cert_file, url]
+    cmd = ["bash", get_file("upload.sh"), report_file, enc_report, key_file, web_cert_file, url]
 
     try:
         proc = subprocess.run(cmd,
@@ -272,31 +265,6 @@ def encrypt_and_upload(url: str,
         raise ReportFailed()
 
     logger.info("File successfully uploaded")
-
-
-def setup_logging(log_level: str, log_config_file: Path, out_folder: Optional[str], persistent_log: bool = False):
-    log_config = json.load(log_config_file.open())
-    handlers = ["console"]
-
-    if out_folder:
-        handlers.append("log_file")
-        log_file = os.path.join(out_folder, "log.txt")
-        log_config["handlers"]["log_file"]["filename"] = log_file
-    else:
-        del log_config["handlers"]["log_file"]
-
-    if persistent_log:
-        handlers.append("persistent_log_file")
-    else:
-        del log_config["handlers"]["persistent_log_file"]
-
-    if log_level is not None:
-        log_config["handlers"]["console"]["level"] = log_level
-
-    for key in list(log_config['loggers']):
-        log_config['loggers'][key]["handlers"] = handlers
-
-    logging.config.dictConfig(log_config)
 
 
 def pack_output_folder(out_folder: str, out_file: str):
@@ -375,14 +343,9 @@ def collect(opts: Any, inv_path: Optional[str], output_folder: Optional[str], ou
     else:
         storage = None
 
-    api_key_path = Path(AGENT_PATH) / 'agent_client_keys/agent_api.key' \
-        if opts.api_key is None else Path(opts.api_key)
-
+    api_key_path = Path(opts.api_key)
     api_key = get_api_key(api_key_path)
-
-    certificates_path = (Path(AGENT_PATH) / 'agent_client_keys') \
-        if opts.certs_folder is None else Path(opts.certs_folder)
-
+    certificates_path = Path(opts.certs_folder)
     certificates = get_certificates(certificates_path)
 
     # run collect
@@ -408,7 +371,7 @@ def parse_args(argv: List[str]) -> Any:
 
     collect_parser = subparsers.add_parser('collect', help='Collect data')
     collect_parser.add_argument("--ceph-master", metavar="NODE", default='-',
-                                help="Run all ceph cluster commands from NODE, first inventory node by default")
+                                help="Run all ceph cluster commands from NODE, (first inventory node by default)")
     collect_parser.add_argument("--inventory", metavar='FILE',
                                 help="Path to file with list of ssh ip/names of ceph nodes")
     collect_parser.add_argument("--dont-pack-result", action="store_true", help="Don't create archive")
@@ -416,8 +379,9 @@ def parse_args(argv: List[str]) -> Any:
                                 type=re_checker(CLIENT_NAME_RE), required=True)
     collect_parser.add_argument("--customer", help=f"Customer name, should match {CLUSTER_NAME_RE}",
                                 type=re_checker(CLUSTER_NAME_RE), required=True)
-    collect_parser.add_argument("--output-folder", help="Folder to put result to", default="/tmp")
-    collect_parser.add_argument("--base-folder", default=".", help="Base folder for all paths")
+    collect_parser.add_argument("--output-folder", default="/tmp", help="Folder to put result to (%(default)s)")
+    collect_parser.add_argument("--base-folder", default=str(Path(".").resolve()),
+                                help="Base folder for all paths (%(default)s)")
 
     # collection flags
     collect_parser.add_argument("--no-rbd-info", action='store_true', help="Don't collect info for rbd volumes")
@@ -431,24 +395,31 @@ def parse_args(argv: List[str]) -> Any:
 
     collect_parser.add_argument("--max-pg-dump-count", default=AUTOPG, type=int,
                                 help=f"maximum PG count to by dumped with 'pg dump' cmd, by default {LUMINOUS_MAX_PG} "
-                                + f"for luminous, {DEFAULT_MAX_PG} for other ceph versions")
-    collect_parser.add_argument("--ceph-log-max-lines", default=10000, type=int, help="Max lines from osd/mon log")
+                                + f"for luminous, {DEFAULT_MAX_PG} for other ceph versions (%(default)s)")
+    collect_parser.add_argument("--ceph-log-max-lines", default=10000, type=int,
+                                help="Max lines from osd/mon log (%(default)s)")
     collect_parser.add_argument("--must-connect-to-all", action="store_true",
                                 help="Must successfully connect to all ceph nodes")
 
+    default_certs_folder = Path(agent.__file__).resolve().parent.parent / 'agent_client_keys'
     collect_parser.add_argument("--wipe", action='store_true', help="Wipe results directory before store data")
     collect_parser.add_argument("--cmd-timeout", default=60, type=int, help="Cmd's run timeout")
-    collect_parser.add_argument("--api-key", default=None, help="RPC api key file path")
-    collect_parser.add_argument("--certs-folder", default=None, help="Folder with rpc ssl certificates")
+    collect_parser.add_argument("--api-key", default=str(default_certs_folder / 'agent_api.key'),
+                                help="RPC api key file path (%(default)s)")
+    collect_parser.add_argument("--certs-folder", default=str(default_certs_folder),
+                                help="Folder with rpc ssl certificates (%(default)s)")
 
     upload = subparsers.add_parser('upload', help='Upload report to server')
     upload.add_argument("--base-folder", default=".", help="Base folder for all paths")
     upload.add_argument('--url', required=True, help="Url to upload to")
-    upload.add_argument('--key', default=str(base_files_path / "enc_key.pub"),
-                        help="Server open key for data encryption")
-    upload.add_argument('--cert', default=str(base_files_path / "mira_report_storage.crt"), help="Server cert file")
-    upload.add_argument('--upload-script-path', default=str(base_files_path / "upload.sh"), help="upload.sh path")
-    upload.add_argument('--http-creds', required=True, help="Http user:password, as provided by mirantis support")
+    upload.add_argument('--key', default=str(get_file("enc_key.pub")),
+                        help="Server open key for data encryption (%(default)s)")
+    upload.add_argument('--cert', default=str(get_file("mira_report_storage.crt")),
+                        help="Storage server cert file (%(default)s)")
+    upload.add_argument('--upload-script-path',
+                        default=str(get_file("upload.sh")), help="upload.sh path (%(default)s)")
+    upload.add_argument('--http-creds', required=True,
+                        help="Http user:password, as provided by mirantis support")
     upload.add_argument('report', help="path to report archive")
 
     for p in (upload, collect_parser):
@@ -462,7 +433,7 @@ def parse_args(argv: List[str]) -> Any:
 
 def main(argv: List[str]) -> int:
     opts = parse_args(argv)
-    log_config = base_files_path / "logging.json"
+    log_config = get_file("logging.json")
 
     if opts.subparser_name == 'collect':
         try:

@@ -3,17 +3,15 @@ import copy
 import datetime
 from enum import Enum
 from ipaddr import IPv4Address, IPv4Network
+from dataclasses import dataclass, field
 from typing import Optional, List, Set, Dict, Any, Callable, Union, Tuple, NewType, Iterable
 
 import numpy
-from dataclasses import dataclass, field
 
 from cephlib.crush import Crush
 from cephlib.units import b2ssize
 from cephlib.common import AttredDict
 
-
-# -----------  HW DEVICES CLASSES  -------------------------------------------------------------------------------------
 
 # ---------------  LSHW ------------------------------------------------------------------------------------------------
 

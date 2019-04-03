@@ -64,6 +64,10 @@ def main(argv: List[str]):
         try:
             cmd = [sys.executable, "-m", "ceph_report.collect_info", "collect", *collect_args]
             logger.info(f"Started collecting with {cmd}, timeout={report_timeout}")
+
+            import os
+            print(os.environ['PYTHONPATH'])
+
             res = subprocess.run(cmd, timeout=report_timeout, stdout=subprocess.PIPE)
 
             res.check_returncode()
