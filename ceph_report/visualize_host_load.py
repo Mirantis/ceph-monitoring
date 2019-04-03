@@ -65,7 +65,10 @@ def make_storage_devs_load_table(hosts: Sequence[Host],
             if max_val is not None:
                 max_per_tp[tp] = max_val
             else:
-                max_per_tp[tp] = max(min_max_val[tp], max(i for i in tp_vals if i is not None))
+                try:
+                    max_per_tp[tp] = max(min_max_val[tp], max(i for i in tp_vals if i is not None))
+                except ValueError:
+                    max_per_tp[tp] = max_val
 
         header_names = sum([[f"{tp.short_name}{cnt}" for cnt in range(mcount)]
                            for tp, mcount in max_disks_per_tp.items()], [])
