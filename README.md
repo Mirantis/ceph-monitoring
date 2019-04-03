@@ -4,24 +4,24 @@ Ceph cluster data collect tool.
 Tool aim to collect and render ceph cluster information into html report.
 
 
-How to make archive:
+How to make archive (you need at least python3.7):
 
         make archive
 
 How to deploy:
     
-* Install agent firsh
+* Install agent first
       
 * ceph_report.sh /opt/mirantis/ceph_report
 
 Create and start service:
     
-        python3.5 /opt/mirantis/ceph_report/ceph_report/install.py --inventory INV --ceph-master XXX --http-creds USER:PASSDW --upload-url https://..... --cluster CLUSTER --customer CUSTOMER
+        python3.5 /opt/mirantis/ceph_report/ceph_report/run.py -- -m ceph_report.install --inventory INV --ceph-master XXX --http-creds USER:PASSDW --upload-url https://..... --cluster CLUSTER --customer CUSTOMER
         
 
 Run collector manually:
 
-/usr/bin/python3.5 /opt/mirantis/ceph_report/ceph_report/run.py /opt/mirantis/ceph_report /opt/mirantis/agent -- collect --api-key /opt/mirantis/agent/agent_client_keys/agent_api.key --certs-folder /opt/mirantis/agent/agent_client_keys --inventory /home/koder/.inventories/local --ceph-master ceph01 --output-folder /var/ceph_reports --log-level DEBUG --persistent-log --cluster local --customer koder
+/usr/bin/python3.5 /opt/mirantis/ceph_report/ceph_report/run.py -- -m ceph_report.collect_info collect --api-key /opt/mirantis/agent/agent_client_keys/agent_api.key --certs-folder /opt/mirantis/agent/agent_client_keys --inventory /home/koder/.inventories/local --ceph-master ceph01 --output-folder /var/ceph_reports --log-level DEBUG --persistent-log --cluster local --customer koder
 
 Upload:
 

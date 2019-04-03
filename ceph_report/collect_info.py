@@ -1,5 +1,4 @@
 import os
-import re
 import sys
 import json
 import shutil
@@ -18,13 +17,14 @@ from dataclasses import dataclass
 
 from cephlib.storage import make_storage, IStorageNNP
 
-AGENT_PATH = os.environ.get("RPC_AGENT_PATH", "/opt/mirantis/agent")
+base_files_path = Path(sys.argv[0]).parent
+AGENT_PATH = os.environ.get("RPC_AGENT_PATH", str(base_files_path.parent.parent / 'agent'))
 sys.path.append(AGENT_PATH)
 
 from .collect_node_classes import INode, Node, Local
 from .collectors import Collector, CephDataCollector, NodeCollector, LUMINOUS_MAX_PG, DEFAULT_MAX_PG, AUTOPG
-from .collect_utils import init_rpc_and_fill_data, CephServices, discover_ceph_services, iter_extra_host
-
+from .collect_utils import init_rpc_and_fill_data, CephServices, discover_ceph_services
+from .utils import CLIENT_NAME_RE, CLUSTER_NAME_RE, re_checker, read_inventory
 
 logger = logging.getLogger('collect')
 
@@ -60,6 +60,7 @@ class CollectorCoordinator:
         self.inventory = inventory
         self.api_key = api_key
         self.ceph_master_node: Optional[INode] = None
+        self.first_inventory_node: Optional[INode] = None
         self.nodes: List[Node] = []
         self.certificates = certificates
 
@@ -69,6 +70,8 @@ class CollectorCoordinator:
 
     async def get_master_node(self) -> Optional[INode]:
         if self.opts.ceph_master:
+            if self.opts.ceph_master == '-':
+                return self.first_inventory_node
             logger.info(f"Connecting to ceph-master: {self.opts.ceph_master}")
             nodes, err = await self.connect_and_init([self.opts.ceph_master])
             assert len(nodes) + len(err) == 1
@@ -102,6 +105,20 @@ class CollectorCoordinator:
 
     async def connect_to_nodes(self) -> List[Node]:
 
+        inventory = list(read_inventory(self.inventory))
+        nodes, errs = await self.connect_and_init(inventory)
+        if errs:
+            for ip_or_hostname, err in errs:
+                logger.error(f"Can't connect to extra node {ip_or_hostname}: {err}")
+            raise ReportFailed()
+
+        fnodes = [node for node in nodes if node.conn_endpoint == inventory[0]]
+        if len(fnodes) != 1:
+            logger.error(f"Inventory empty or has duplicated nodes")
+            raise ReportFailed()
+
+        self.first_inventory_node = fnodes[0]
+
         self.ceph_master_node = await self.get_master_node()
         if self.ceph_master_node is None:
             raise ReportFailed()
@@ -112,12 +129,6 @@ class CollectorCoordinator:
 
         ceph_services = None if self.opts.ceph_master_only \
             else await discover_ceph_services(self.ceph_master_node, self.opts)
-
-        nodes, errs = await self.connect_and_init(list(iter_extra_host(self.inventory)))
-        if errs:
-            for ip_or_hostname, err in errs:
-                logging.error(f"Can't connect to extra node {ip_or_hostname}: {err}")
-            raise ReportFailed()
 
         # add information from monmap and osdmap about ceph services and connect to extra nodes
         if ceph_services:
@@ -396,12 +407,15 @@ def parse_args(argv: List[str]) -> Any:
     subparsers = parser.add_subparsers(dest='subparser_name')
 
     collect_parser = subparsers.add_parser('collect', help='Collect data')
-    collect_parser.add_argument("--ceph-master", metavar="NODE", help="Run all ceph cluster commands from NODE")
+    collect_parser.add_argument("--ceph-master", metavar="NODE", default='-',
+                                help="Run all ceph cluster commands from NODE, first inventory node by default")
     collect_parser.add_argument("--inventory", metavar='FILE',
                                 help="Path to file with list of ssh ip/names of ceph nodes")
     collect_parser.add_argument("--dont-pack-result", action="store_true", help="Don't create archive")
-    collect_parser.add_argument("--cluster", help="Cluster name, should match [a-zA-Z_0-9-]+", required=True)
-    collect_parser.add_argument("--customer", help="Customer name, should match [a-zA-Z_0-9-]+", required=True)
+    collect_parser.add_argument("--cluster", help=f"Cluster name, should match {CLIENT_NAME_RE}",
+                                type=re_checker(CLIENT_NAME_RE), required=True)
+    collect_parser.add_argument("--customer", help=f"Customer name, should match {CLUSTER_NAME_RE}",
+                                type=re_checker(CLUSTER_NAME_RE), required=True)
     collect_parser.add_argument("--output-folder", help="Folder to put result to", default="/tmp")
     collect_parser.add_argument("--base-folder", default=".", help="Base folder for all paths")
 
@@ -452,18 +466,9 @@ def main(argv: List[str]) -> int:
 
     if opts.subparser_name == 'collect':
         try:
-            if not re.match("[0-9a-zA-Z_-]+$", opts.cluster):
-                logger.error("Cluster name incorrect - %s, should match [0-9a-zA-Z_-]+$", opts.cluster)
-                return 1
-
-            if not re.match("[0-9a-zA-Z_-]+$", opts.customer):
-                logger.error("Customer name incorrect - %s, should match [0-9a-zA-Z_-]+$", opts.customer)
-                return 1
-
             inv_path, output_folder, output_arch = check_and_prepare_paths(opts)
             setup_logging(opts.log_level, log_config, output_folder, opts.persistent_log)
             logger.info(repr(argv))
-
             collect(opts, inv_path, output_folder, output_arch)
 
         except ReportFailed:

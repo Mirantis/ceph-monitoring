@@ -62,7 +62,7 @@ class Node(INode):
         return self.name
 
     def dct(self) -> Dict[str, Any]:
-        return {'name': self.name, 'ssh_endpoint': self.conn_endpoint, 'all_ips': list(self.all_ips)}
+        return {'name': self.name, 'endpoint': self.conn_endpoint, 'all_ips': list(self.all_ips)}
 
     def __str__(self) -> str:
         return f"Node(name={self.name}, endpoint={self.conn_endpoint})"

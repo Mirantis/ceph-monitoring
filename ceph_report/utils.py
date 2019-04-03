@@ -1,7 +1,12 @@
-import datetime
 import re
+import argparse
+import datetime
 from enum import Enum
-from typing import NamedTuple, Optional, Dict, Tuple
+from typing import NamedTuple, Dict, Tuple, Callable, Iterator, Optional
+
+
+CLUSTER_NAME_RE = "[0-9a-zA-Z_-]+$"
+CLIENT_NAME_RE = "[0-9a-zA-Z_-]+$"
 
 
 class FileType(Enum):
@@ -105,3 +110,25 @@ def parse_file_name(name: str) -> Optional[FileInfo]:
                     ref_ftype=ref_ftype, customer=customer, cluster=cluster,
                     collect_datetime=dtm)
 
+
+def re_checker(pattern: str) -> Callable[[str], str]:
+    rr = re.compile(pattern)
+
+    def check(param):
+        if not rr.match(param):
+            raise argparse.ArgumentTypeError
+        return param
+
+    return check
+
+
+def read_inventory(path: Optional[str]) -> Iterator[str]:
+    """Iterate over all extra hosts from --inventory options, if some"""
+    if path:
+        with open(path) as fd:
+            for ln in fd:
+                ln = ln.strip()
+                if ln and not ln.startswith("#"):
+                    assert ':' not in ln
+                    assert len(ln.split()) == 1
+                    yield ln

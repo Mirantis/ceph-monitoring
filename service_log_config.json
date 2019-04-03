@@ -1,0 +1,34 @@
+{
+    "version": 1,
+    "disable_existing_loggers": true,
+    "formatters": {
+        "simple": {
+            "format": "%(asctime)s - %(levelname)s - %(message)s",
+            "datefmt": "%H:%M:%S"
+        }
+    },
+    "handlers": {
+        "console": {
+            "level": "INFO",
+            "class": "logging.StreamHandler",
+            "formatter": "simple",
+            "stream"  : "ext://sys.stdout"
+        },
+        "service_log_file": {
+            "level": "DEBUG",
+            "class": "logging.FileHandler",
+            "formatter": "simple",
+            "filename": "/var/log/ceph_report_service.log"
+        },
+        "run_log_file": {
+            "level": "DEBUG",
+            "class": "logging.FileHandler",
+            "formatter": "simple",
+            "filename": "/var/log/ceph_report_runner.log"
+        }
+    },
+    "loggers": {
+        "service":     {"level": "DEBUG", "handlers": ["console", "service_log_file"]},
+        "run":         {"level": "DEBUG", "handlers": ["console", "run_log_file"]}
+    }
+}

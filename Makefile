@@ -10,19 +10,19 @@ MAKE_ARCH=/home/koder/workspace/pet/agent/agent/make_arch.py
 
 
 mypy:
-		MYPYPATH=${STUBS} python -m mypy --ignore-missing-imports --follow-imports=skip ${ALL_FILES}
+		MYPYPATH=${STUBS} python3 -m mypy --ignore-missing-imports --follow-imports=skip ${ALL_FILES}
 
 mypy_collect:
-		MYPYPATH=${STUBS} python -m mypy --ignore-missing-imports --follow-imports=skip ${COLLECT_FILES}
+		MYPYPATH=${STUBS} python3 -m mypy --ignore-missing-imports --follow-imports=skip ${COLLECT_FILES}
 
 pylint:
-		python -m pylint '${PYLINT_FMT}' --rcfile=pylint.rc ${ALL_FILES}
+		python3 -m pylint '${PYLINT_FMT}' --rcfile=pylint.rc ${ALL_FILES}
 
 pylint_e:
 		python3 -m pylint -E '${PYLINT_FMT}' --rcfile=pylint.rc ${ALL_FILES}
 
 archive:
-		python '${MAKE_ARCH}' --config arch_config.txt '${CURR_PATH}' '${CURR_PATH}/binary/ceph_report.sh'
+		python3 '${MAKE_ARCH}' --config arch_config.txt '${CURR_PATH}' '${CURR_PATH}/binary/ceph_report.sh'
 
 whl:
-		python setup.py sdist bdist_wheel
+		python3 setup.py sdist bdist_wheel

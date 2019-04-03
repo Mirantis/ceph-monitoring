@@ -3,7 +3,7 @@ import re
 import socket
 import ipaddress
 import traceback
-from typing import Optional, Tuple, Set, Dict, Any, List, NamedTuple, Iterator, Union
+from typing import Optional, Tuple, Set, Dict, Any, List, NamedTuple, Union
 
 from agent.client import AsyncRPCClient
 from cephlib.discover import OSDConfig, get_mons_nodes, get_osds_nodes
@@ -174,15 +174,3 @@ async def init_rpc_and_fill_data(ips_or_hostnames: List[str],
             rpc_nodes.append(result)
 
     return rpc_nodes, failed_nodes
-
-
-def iter_extra_host(inventory_path: Optional[str]) -> Iterator[str]:
-    """Iterate over all extra hosts from --inventory options, if some"""
-    if inventory_path:
-        with open(inventory_path) as fd:
-            for ln in fd:
-                ln = ln.strip()
-                if ln and not ln.startswith("#"):
-                    assert ':' not in ln
-                    assert len(ln.split()) == 1
-                    yield ln

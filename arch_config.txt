@@ -1,6 +1,6 @@
 sources = ceph_report/collect*.py ceph_report/files/* \
-    ceph_report/run.py ceph_report/run_service.py ceph_report/install.py \
-    mirantis_ceph_reporter.service
+    ceph_report/run.py ceph_report/service.py ceph_report/install.py ceph_report/utils.py \
+    mirantis_ceph_reporter.service service_log_config.json
 
 remove_files = *.c *.pyi *.h *.cpp *.hpp *.dist-info *.pyx *.pxd
 version = 3.7
