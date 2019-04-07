@@ -1,26 +1,31 @@
 import os
-import struct
 import sys
 import json
 import shutil
-import logging
-import os.path
+import struct
 import asyncio
+import os.path
 import argparse
 import datetime
 import tempfile
+import traceback
 import subprocess
 import logging.config
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, Any, List, Tuple, Set, Callable, Optional, Type, Iterator, Coroutine
+from typing import Callable, Coroutine, NamedTuple
+from typing import Optional, Tuple, Dict, Any, List, Union
 
 import agent
-from cephlib.storage import make_storage, IStorageNNP
+from agent.client import AsyncRPCClient, IAgentRPCNode
+from cephlib.classes import CephReleases
+from cephlib.discover import discover_report, parse_ceph_version, CephReport
+from koder_utils.storage.storage import make_storage, IStorageNNP
+from koder_utils.rpc_node import IAsyncNode, LocalHost, get_hostname
+from koder_utils.utils import ignore_all
 
-from .collect_node_classes import INode, Node, Local
-from .collectors import Collector, CephDataCollector, NodeCollector, LUMINOUS_MAX_PG, DEFAULT_MAX_PG, AUTOPG
-from .collect_utils import init_rpc_and_fill_data, CephServices, discover_ceph_services
+from .collectors import (CephOSDCollector, CephMonCollector, CephMasterCollector, NodeCollector,
+                         LUMINOUS_MAX_PG, DEFAULT_MAX_PG, AUTOPG)
 from .utils import CLIENT_NAME_RE, CLUSTER_NAME_RE, re_checker, read_inventory, get_file, setup_logging
 from .prom_query import get_block_devs_loads
 
@@ -30,12 +35,6 @@ logger = logging.getLogger('collect')
 # ------------------------  Collect coordinator functions --------------------------------------------------------------
 
 
-ALL_COLLECTORS: List[Type[Collector]] = [CephDataCollector, NodeCollector]
-ALL_COLLECTORS_MAP: Dict[str, Type[Collector]] = {collector.name: collector for collector in ALL_COLLECTORS}
-
-CollectorsGenerator = Iterator[Tuple[Callable[[], Coroutine[Any, Any, None]], INode]]
-
-
 class ReportFailed(RuntimeError):
     pass
 
@@ -43,199 +42,32 @@ class ReportFailed(RuntimeError):
 @dataclass
 class ExceptionWithNode(Exception):
     exc: Exception
-    node: INode
+    hostname: str
 
 
-class CollectorCoordinator:
-    def __init__(self,
-                 storage: IStorageNNP,
-                 inventory: List[str], opts: Any, api_key: str,
-                 certificates: Dict[str, Any]) -> None:
-        self.nodes: List[Node] = []
-        self.opts = opts
-        self.storage = storage
-        self.inventory = inventory
-        self.api_key = api_key
-        self.ceph_master_node: Optional[INode] = None
-        self.first_inventory_node: Optional[INode] = None
-        self.nodes: List[Node] = []
-        self.certificates = certificates
+async def get_collectors(storage: IStorageNNP,
+                         opts: Any,
+                         master: IAsyncNode,
+                         nodes: List[IAgentRPCNode],
+                         report: CephReport) -> List[Tuple[Callable[[], Coroutine[Any, Any, None]], str]]:
 
-    async def connect_and_init(self, ips_or_hostnames: List[str]) -> Tuple[List[Node], List[Tuple[str, str]]]:
-        return await init_rpc_and_fill_data(ips_or_hostnames, access_key=self.api_key,
-                                            certificates=self.certificates)
+    hostname = await get_hostname(master)
+    res = [(CephMasterCollector(storage, opts, master, hostname, report).collect, hostname)]
 
-    async def get_master_node(self) -> Optional[INode]:
-        if self.opts.ceph_master:
-            if self.opts.ceph_master == '-':
-                return self.first_inventory_node
-            logger.info(f"Connecting to ceph-master: {self.opts.ceph_master}")
-            nodes, err = await self.connect_and_init([self.opts.ceph_master])
-            assert len(nodes) + len(err) == 1
-            if err:
-                logger.error(f"Can't connect to ceph-master {self.opts.ceph_master}: {err[0]}")
-                return None
-            return nodes[0]
-        else:
-            return Local()
+    mon_nodes = {mon.name for mon in report.mons}
+    osd_nodes = {osd.hostname for osd in report.osds}
 
-    @staticmethod
-    def fill_ceph_services(nodes: List[Node], ceph_services: CephServices) -> Set[str]:
-        all_nodes_ips: Dict[str, Node] = {}
+    if not opts.ceph_master_only:
         for node in nodes:
-            all_nodes_ips.update({ip: node for ip in node.all_ips})
+            hostname = await get_hostname(master)
+            if hostname in mon_nodes:
+                res.append((CephOSDCollector(storage, opts, node, hostname, report).collect, hostname))
 
-        missing_ceph_ips = set()
-        for ip, mon_name in ceph_services.mons.items():
-            if ip not in all_nodes_ips:
-                missing_ceph_ips.add(ip)
-            else:
-                all_nodes_ips[ip].mon = mon_name
+            if hostname in osd_nodes:
+                res.append((CephMonCollector(storage, opts, node, hostname, report).collect, hostname))
 
-        for ip, osds_info in ceph_services.osds.items():
-            if ip not in all_nodes_ips:
-                missing_ceph_ips.add(ip)
-            else:
-                all_nodes_ips[ip].osds = osds_info
-
-        return missing_ceph_ips
-
-    async def connect_to_nodes(self) -> List[Node]:
-
-        nodes, errs = await self.connect_and_init(self.inventory)
-        if errs:
-            for ip_or_hostname, err in errs:
-                logger.error(f"Can't connect to extra node {ip_or_hostname}: {err}")
-            raise ReportFailed()
-
-        fnodes = [node for node in nodes if node.conn_endpoint == self.inventory[0]]
-        if len(fnodes) != 1:
-            logger.error(f"Inventory empty or has duplicated nodes")
-            raise ReportFailed()
-
-        self.first_inventory_node = fnodes[0]
-
-        self.ceph_master_node = await self.get_master_node()
-        if self.ceph_master_node is None:
-            raise ReportFailed()
-
-        if (await self.ceph_master_node.run('which ceph')).returncode != 0:
-            logger.error("No 'ceph' command available on master node.")
-            raise ReportFailed()
-
-        ceph_services = None if self.opts.ceph_master_only \
-            else await discover_ceph_services(self.ceph_master_node, self.opts)
-
-        # add information from monmap and osdmap about ceph services and connect to extra nodes
-        if ceph_services:
-
-            missing_ceph_ips = self.fill_ceph_services(nodes, ceph_services)
-
-            ceph_nodes, errs = await self.connect_and_init(list(missing_ceph_ips))
-            if errs:
-                lfunc = logging.error if self.opts.all_ceph else logging.warning
-                lfunc("Can't connect to ceph nodes")
-                for ip, err in errs:
-                    lfunc(f"    {ip} => {err}")
-
-                if self.opts.all_ceph:
-                    raise ReportFailed()
-
-            missing_mons = {ip: mon for ip, mon in ceph_services.mons.items() if ip in missing_ceph_ips}
-            missing_osds = {ip: osds for ip, osds in ceph_services.osds.items() if ip in missing_ceph_ips}
-
-            missing_ceph_ips2 = self.fill_ceph_services(ceph_nodes, CephServices(missing_mons, missing_osds))
-            assert not missing_ceph_ips2
-
-            nodes += ceph_nodes
-
-        logger.info("Found %s nodes with osds", sum(1 for node in nodes if node.osds))
-        logger.info("Found %s nodes with mons", sum(1 for node in nodes if node.mon))
-        logger.info(f"Run with {len(nodes)} hosts in total")
-
-        for node in nodes:
-            logger.debug(f"Node: {node.ceph_info()}")
-
-        return nodes
-
-    def collect_ceph_data(self) -> CollectorsGenerator:
-        assert self.ceph_master_node is not None
-        yield CephDataCollector(self.storage,
-                                self.opts,
-                                self.ceph_master_node,
-                                pretty_json=not self.opts.no_pretty_json).collect_master, self.ceph_master_node
-
-        if not self.opts.ceph_master_only:
-            for node in self.nodes:
-                if node.mon:
-                    collector = CephDataCollector(self.storage,
-                                                  self.opts,
-                                                  node,
-                                                  pretty_json=not self.opts.no_pretty_json)
-
-                    yield collector.collect_monitor, node
-
-                if node.osds:
-                    collector = CephDataCollector(self.storage,
-                                                  self.opts,
-                                                  node,
-                                                  pretty_json=not self.opts.no_pretty_json)
-                    yield collector.collect_osd, node
-
-    def collect_node_data(self) -> CollectorsGenerator:
-        for node in self.nodes:
-            yield NodeCollector(self.storage,
-                                self.opts,
-                                node,
-                                pretty_json=not self.opts.no_pretty_json).collect, node
-
-    async def collect(self):
-        # This variable is updated from main function
-        self.nodes = await self.connect_to_nodes()
-        assert self.ceph_master_node is not None
-        if self.opts.detect_only:
-            return
-
-        self.storage.put_raw(json.dumps([node.dct() for node in self.nodes]).encode('utf8'), "hosts.json")
-
-        async def raise_with_node(func, node: INode):
-            try:
-                await func()
-            except Exception as local_exc:
-                raise ExceptionWithNode(local_exc, node) from local_exc
-
-        all_coros = list(self.collect_ceph_data()) + list(self.collect_node_data())
-        try:
-            await asyncio.gather(*(raise_with_node(func, node) for func, node in all_coros), return_exceptions=False)
-        except ExceptionWithNode as exc:
-            logger.error(f"Exception happened during collecting from node {exc.node} (see full tb below): {exc.exc}")
-            raise
-        except Exception as exc:
-            logger.error(f"Exception happened(see full tb below): {exc}")
-            raise
-        finally:
-            logger.info("Collecting logs and teardown RPC servers")
-            for node in self.nodes + [self.ceph_master_node]:
-                try:
-                    self.storage.put_raw((await node.rpc.sys.get_logs()).encode('utf8'),
-                                         f"rpc_logs/{node.name}.txt")
-                except Exception:
-                    pass
-
-        logger.info(f"Totally collected data from {len(self.nodes)} nodes")
-
-        for node in sorted(self.nodes, key=lambda x: x.name):
-            if node.osds and node.mon:
-                logger.info(f"Node {node.name} has mon and {len(node.osds)} osds")
-            elif node.osds:
-                logger.info(f"Node {node.name} has {len(node.osds)} osds")
-            elif node.mon:
-                logger.info(f"Node {node.name} has mon")
-
-        logger.info("Totally found %s monitors, %s OSD nodes with %s OSD daemons",
-                    sum(1 for node in self.nodes if node.mon),
-                    sum(1 for node in self.nodes if node.osds),
-                    sum(len(node.osds) for node in self.nodes if node.osds))
+            res.append((NodeCollector(storage, opts, node, hostname).collect, hostname))
+    return res
 
 
 def encrypt_and_upload(url: str,
@@ -347,7 +179,40 @@ async def collect_prom(prom_url: str, inventory: List[str], target: Path, time_r
                     fd.write(struct.pack('!%sd' % len(measurements), *measurements))
 
 
-def collect(opts: Any, inv_path: Optional[str], output_folder: Optional[str], output_arch: Optional[str]):
+async def get_master_node(self) -> Optional[IAsyncNode]:
+    if self.opts.ceph_master:
+        if self.opts.ceph_master == '-':
+            return self.first_inventory_node
+        logger.info(f"Connecting to ceph-master: {self.opts.ceph_master}")
+        nodes, err = await self.connect_and_init([self.opts.ceph_master])
+        assert len(nodes) + len(err) == 1
+        if err:
+            logger.error(f"Can't connect to ceph-master {self.opts.ceph_master}: {err[0]}")
+            return None
+        return nodes[0]
+    else:
+        return LocalHost()
+
+
+async def check_master(conn: IAsyncNode):
+    if (await conn.run('which ceph')).returncode != 0:
+        logger.error("No 'ceph' command available on master node.")
+        raise ReportFailed()
+
+    version = parse_ceph_version(await conn.run_str('ceph --version'))
+    if version.release < CephReleases.jewel:
+        logger.error(f"Too old ceph version {version!r}, only jewel and later ceph supported")
+        raise ReportFailed()
+
+
+async def raise_with_node(func, hostname: str) -> None:
+    try:
+        await func()
+    except Exception as local_exc:
+        raise ExceptionWithNode(local_exc, hostname) from local_exc
+
+
+async def run_collection(opts: Any, inv_path: Optional[str], output_folder: Optional[str], output_arch: Optional[str]):
     if output_folder:
         if opts.dont_pack_result:
             logger.info("Store data into %r", output_folder)
@@ -365,26 +230,87 @@ def collect(opts: Any, inv_path: Optional[str], output_folder: Optional[str], ou
 
     inventory = list(read_inventory(inv_path))
 
-    # run collect
-    asyncio.run(CollectorCoordinator(storage,
-                                     opts=opts,
-                                     inventory=inventory,
-                                     api_key=api_key,
-                                     certificates=certificates).collect())
+    conn_pool = ConnectionPool(api_key, certificates, max_conn_per_node=opts.max_conn)
+
+    failed = []
+    for node in inventory:
+        try:
+            conn = await conn_pool.get_conn(node)
+        except:
+            failed.append(node)
+
+        conn_pool.release_conn(node, conn)
+
+    if failed and opts.must_connect_to_all:
+        for ip_or_hostname, err in failed:
+            logger.error(f"Can't connect to extra node {ip_or_hostname}: {err}")
+        raise ReportFailed()
+
+    # find master
+    if opts.ceph_master == 'localhost':
+        master_node_l = LocalHost()
+    else:
+        name = inventory[0] if opts.ceph_master == '-' else opts.ceph_master
+        master_node_l = [conn for conn in conns if conn.conn_addr == name]
+
+    if len(master_node_l) != 1:
+        logger.error(f"Inventory empty or has duplicated nodes or empty")
+        raise ReportFailed()
+
+    master_node = master_node_l[0]
+
+    await check_master(master_node)
+
+    if opts.ceph_master_only:
+        return
+    else:
+        ceph_report = await discover_report(master_node, opts)
+
+        logger.info(f"Found {len(ceph_report.osds)} nodes with osds")
+        logger.info(f"Found {len(ceph_report.mons)} nodes with mons")
+        logger.info(f"Run with {len(conns)} hosts in total")
+
+    nodes = ...
+
+    # This variable is updated from main function
+    if opts.detect_only:
+        return
+
+    storage.put_raw(json.dumps([node.dct() for node in nodes]).encode('utf8'), "hosts.json")
+
+    all_coros = await get_collectors(storage, opts, master_node, nodes, ceph_report)
+
+    try:
+        await asyncio.gather(*(raise_with_node(func, node) for func, node in all_coros), return_exceptions=False)
+    except ExceptionWithNode as exc:
+        logger.error(f"Exception happened during collecting from node {exc.hostname} (see full tb below): {exc.exc}")
+        raise
+    except Exception as exc:
+        logger.error(f"Exception happened(see full tb below): {exc}")
+        raise
+    finally:
+        logger.info("Collecting logs and teardown RPC servers")
+        for node in nodes:
+            with ignore_all:
+                storage.put_raw((await node.rpc_conn.sys.get_logs()).encode('utf8'), f"rpc_logs/{node.name}.txt")
+
+    logger.info(f"Totally collected data from {len(nodes)} nodes")
+
+    for node in sorted(nodes, key=lambda x: x.hostname):
+        if node.osds and node.mon:
+            logger.info(f"Node {node.hostname} has mon and {len(node.osds)} osds")
+        elif node.osds:
+            logger.info(f"Node {node.hostname} has {len(node.osds)} osds")
+        elif node.mon:
+            logger.info(f"Node {node.hostname} has mon")
+
+    logger.info("Totally found %s monitors, %s OSD nodes with %s OSD daemons",
+                sum(1 for node in nodes if node.mon),
+                sum(1 for node in nodes if node.osds),
+                sum(len(node.osds) for node in nodes if node.osds))
 
     if output_folder and opts.prometheus:
-        asyncio.run(collect_prom(opts.prometheus, inventory, Path(output_folder), opts.prometheus_interval))
-
-    # compress/commit output folder
-    if output_folder:
-        if opts.dont_pack_result:
-            logger.warning("Unpacked tree is kept as --dont-pack-result option is set, so no archive created")
-            print("Result stored into", output_folder)
-        else:
-            assert output_arch is not None
-            pack_output_folder(output_folder, output_arch)
-            print("Result saved into", output_arch)
-            shutil.rmtree(output_folder)
+        await collect_prom(opts.prometheus, inventory, Path(output_folder), opts.prometheus_interval)
 
 
 def parse_args(argv: List[str]) -> Any:
@@ -407,6 +333,7 @@ def parse_args(argv: List[str]) -> Any:
                                 help="Base folder for all paths (%(default)s)")
 
     # collection flags
+    collect_parser.add_argument("--max-conn", default=16, type=int, help="Max connection per node")
     collect_parser.add_argument("--no-rbd-info", action='store_true', help="Don't collect info for rbd volumes")
     collect_parser.add_argument("--ceph-master-only", action="store_true",
                                 help="Run only ceph master data collection, no info from " +
@@ -415,7 +342,9 @@ def parse_args(argv: List[str]) -> Any:
     collect_parser.add_argument("--detect-only", action="store_true",
                                 help="Don't collect any data, only detect cluster nodes")
     collect_parser.add_argument("--no-pretty-json", action="store_true", help="Don't prettify json data")
-
+    collect_parser.add_argument("--collect-txt", action="store_true", help="Collect human-readable outputs(txt)")
+    collect_parser.add_argument("--collect-rgw", action="store_true", help="Collect radosgw info")
+    collect_parser.add_argument("--collect-maps", action="store_true", help="Collect txt/binary osdmap/crushmap")
     collect_parser.add_argument("--max-pg-dump-count", default=AUTOPG, type=int,
                                 help=f"maximum PG count to by dumped with 'pg dump' cmd, by default {LUMINOUS_MAX_PG} "
                                 + f"for luminous, {DEFAULT_MAX_PG} for other ceph versions (%(default)s)")
@@ -430,7 +359,7 @@ def parse_args(argv: List[str]) -> Any:
     collect_parser.add_argument("--api-key", default=str(default_certs_folder / 'agent_api.key'),
                                 help="RPC api key file path (%(default)s)")
     collect_parser.add_argument("--certs-folder", default=str(default_certs_folder),
-                                help="Folder with rpc ssl certificates (%(default)s)")
+                                help="Folder with rpc_conn ssl certificates (%(default)s)")
 
     collect_parser.add_argument("--prometheus", default=None, help="Prometheus url to collect data")
     collect_parser.add_argument("--prometheus-interval", default=24 * 7, type=int,
@@ -467,8 +396,18 @@ def main(argv: List[str]) -> int:
             inv_path, output_folder, output_arch = check_and_prepare_paths(opts)
             setup_logging(opts.log_level, log_config, output_folder, opts.persistent_log)
             logger.info(repr(argv))
-            collect(opts, inv_path, output_folder, output_arch)
 
+            asyncio.run(run_collection(opts, inv_path, output_folder, output_arch))
+
+            if output_folder:
+                if opts.dont_pack_result:
+                    logger.warning("Unpacked tree is kept as --dont-pack-result option is set, so no archive created")
+                    print("Result stored into", output_folder)
+                else:
+                    assert output_arch is not None
+                    pack_output_folder(output_folder, output_arch)
+                    print("Result saved into", output_arch)
+                    shutil.rmtree(output_folder)
         except ReportFailed:
             return 1
         except Exception:

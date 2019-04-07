@@ -24,7 +24,7 @@
             "level": "DEBUG",
             "class": "logging.FileHandler",
             "formatter": "simple",
-            "filename": "/var/log/ceph_report_collector.log"
+            "filename": "{LOG_FOLDER}/ceph_report_collector.log"
         }
     },
     "loggers": {

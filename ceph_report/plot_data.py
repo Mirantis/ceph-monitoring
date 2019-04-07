@@ -20,7 +20,7 @@ with warnings.catch_warnings():
     import seaborn
 
 from cephlib.plot import plot_histo, hmap_from_2d, plot_hmap_with_histo
-from cephlib.crush import Node, Rule
+from cephlib.crush import CrushNode, Rule
 
 
 from .ceph_loader import NO_VALUE, CephInfo
@@ -261,7 +261,7 @@ class ValsSummary:
     values: Dict[str, float]
 
 
-def do_get_values(node: Node, vals: Dict[str, float], res: Dict[str, ValsSummary]):
+def do_get_values(node: CrushNode, vals: Dict[str, float], res: Dict[str, ValsSummary]):
     vs = res.get(node.type)
     if vs:
         assert node.name not in vs.values
@@ -273,7 +273,7 @@ def do_get_values(node: Node, vals: Dict[str, float], res: Dict[str, ValsSummary
         do_get_values(ch, vals, res)
 
 
-def get_values(node: Node, vals: Dict[str, float]) -> Dict[str, ValsSummary]:
+def get_values(node: CrushNode, vals: Dict[str, float]) -> Dict[str, ValsSummary]:
     res: Dict[str, ValsSummary] = {}
     do_get_values(node, vals, res)
     for vs in res.values():
@@ -304,12 +304,12 @@ def calc_min_max(summaries: Dict[str, ValsSummary],
     return sett
 
 
-def get_weight_colors(root_node: Node, ceph: CephInfo,
+def get_weight_colors(root_node: CrushNode, ceph: CephInfo,
                       cmaps: Dict[str, numpy.ndarray]) -> Dict[str, Tuple[str, str]]:
 
     nodes_weights: Dict[str, float] = {}
 
-    def copy_weight(node: Node):
+    def copy_weight(node: CrushNode):
         nodes_weights[node.name] = node.weight
         for ch in node.childs:
             copy_weight(ch)
@@ -320,11 +320,11 @@ def get_weight_colors(root_node: Node, ceph: CephInfo,
     return val2colors(weights, sett, cmaps, lambda x: f"{x:.2f}")
 
 
-def get_used_space_colors(root_node: Node, ceph: CephInfo,
+def get_used_space_colors(root_node: CrushNode, ceph: CephInfo,
                           cmaps: Dict[str, numpy.ndarray]) -> Dict[str, Tuple[str, str]]:
     used: Dict[str, float] = {}
 
-    def set_used_space(node: Node) -> float:
+    def set_used_space(node: CrushNode) -> float:
         if node.name not in used:
             if node.type == 'osd':
                 used[node.name] = ceph.osds[node.id].used_space
@@ -337,11 +337,11 @@ def get_used_space_colors(root_node: Node, ceph: CephInfo,
     return val2colors(used_space, calc_min_max(used_space, 0.6), cmaps, b2ssize)
 
 
-def get_data_size_colors(root_node: Node, ceph: CephInfo,
+def get_data_size_colors(root_node: CrushNode, ceph: CephInfo,
                          cmaps: Dict[str, numpy.ndarray]) -> Dict[str, Tuple[str, str]]:
     sizes: Dict[str, float] = {}
 
-    def set_data_size(node: Node) -> float:
+    def set_data_size(node: CrushNode) -> float:
         if node.name not in sizes:
             if node.type == 'osd':
                 sizes[node.name] = ceph.osds[node.id].pg_stats.bytes
@@ -354,11 +354,11 @@ def get_data_size_colors(root_node: Node, ceph: CephInfo,
     return val2colors(data_size, calc_min_max(data_size, 0.6), cmaps, b2ssize)
 
 
-def get_free_space_colors(root_node: Node, ceph: CephInfo,
+def get_free_space_colors(root_node: CrushNode, ceph: CephInfo,
                           cmaps: Dict[str, numpy.ndarray]) -> Dict[str, Tuple[str, str]]:
     free_space: Dict[str, float] = {}
 
-    def set_free_space(node: Node) -> float:
+    def set_free_space(node: CrushNode) -> float:
         if node.name not in free_space:
             if node.type == 'osd':
                 free_space[node.name] = ceph.osds[node.id].free_space
@@ -371,11 +371,11 @@ def get_free_space_colors(root_node: Node, ceph: CephInfo,
     return val2colors(free_summ, calc_min_max(free_summ, 0.6), cmaps, b2ssize)
 
 
-def get_free_perc_colors(root_node: Node, ceph: CephInfo,
+def get_free_perc_colors(root_node: CrushNode, ceph: CephInfo,
                          cmaps: Dict[str, numpy.ndarray]) -> Dict[str, Tuple[str, str]]:
     free_perc: Dict[str, float] = {}
 
-    def set_free_perc(node: Node) -> Optional[float]:
+    def set_free_perc(node: CrushNode) -> Optional[float]:
         if node.name not in free_perc:
             if node.type == 'osd':
                 free_perc[node.name] = ceph.osds[node.id].free_perc
@@ -407,7 +407,7 @@ def val2colors(vals: Dict[str, ValsSummary],
     return res
 
 
-def make_dot(node: Node, idmap: Dict[str, str], id_prefix: str = "") -> Iterator[str]:
+def make_dot(node: CrushNode, idmap: Dict[str, str], id_prefix: str = "") -> Iterator[str]:
     dname = to_dot_name(node.name)
     htmlid = id_prefix + dname
 

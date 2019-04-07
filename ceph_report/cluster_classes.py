@@ -11,6 +11,7 @@ import numpy
 from cephlib.crush import Crush
 from cephlib.units import b2ssize
 from cephlib.common import AttredDict
+from cephlib.classes import CephVersion
 
 
 # ---------------  LSHW ------------------------------------------------------------------------------------------------
@@ -464,38 +465,6 @@ class Cluster:
 
 
 # ----------------  CEPH -----------------------------------------------------------------------------------------------
-
-
-class CephVersions(Enum):
-    jewel = 10
-    kraken = 11
-    luminous = 12
-    mimic = 13
-
-    def __lt__(self, other: 'CephVersions') -> bool:
-        return self.value < other.value
-
-    def __gt__(self, other: 'CephVersions') -> bool:
-        return self.value > other.value
-
-    def __ge__(self, other: 'CephVersions') -> bool:
-        return self.value >= other.value
-
-
-@dataclass(order=True, unsafe_hash=True)
-class CephVersion:
-    major: int
-    minor: int
-    bugfix: int
-    extra: str
-    commit_hash: str
-
-    def __str__(self) -> str:
-        return f"{self.major}.{self.minor}.{self.bugfix}{self.extra}  [{self.commit_hash[:8]}]"
-
-    @property
-    def version(self) -> CephVersions:
-        return CephVersions(self.major)
 
 
 class MonRole(Enum):

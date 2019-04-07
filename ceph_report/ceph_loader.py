@@ -137,13 +137,11 @@ def parse_ceph_versions(data: str) -> Dict[str, CephVersion]:
         if osd_ver_rr.match(line):
             name, data_js = line.split(":", 1)
             rr = version_rr.match(json.loads(data_js)["version"])
-            if not rr:
-                logger.error("Can't parse version %r from %r", json.loads(data_js)["version"], line)
+            try:
+                vers[name.strip()] = parse_ceph_version(json.loads(data_js)["version"])
+            except Exception as exc:
+                logger.error(f"Can't parse version {line}: {exc}")
                 raise StopError()
-            major, minor, bugfix = map(int, rr.group("version").split("."))
-            vers[name.strip()] = CephVersion(major, minor, bugfix,
-                                             extra=rr.group("extra"),
-                                             commit_hash=rr.group("hash"))
     return vers
 
 

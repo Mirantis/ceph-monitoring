@@ -18,13 +18,13 @@
             "level": "DEBUG",
             "class": "logging.FileHandler",
             "formatter": "simple",
-            "filename": "/var/log/ceph_report_service.log"
+            "filename": "{LOG_FOLDER}/ceph_report_service.log"
         },
         "run_log_file": {
             "level": "DEBUG",
             "class": "logging.FileHandler",
             "formatter": "simple",
-            "filename": "/var/log/ceph_report_runner.log"
+            "filename": "{LOG_FOLDER}/ceph_report_runner.log"
         }
     },
     "loggers": {
