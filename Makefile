@@ -6,7 +6,7 @@ STUBS="/home/koder/workspace/typeshed"
 PYLINT_FMT=--msg-template={path}:{line}: [{msg_id}({symbol}), {obj}] {msg}
 
 CURR_PATH=$(dir $(abspath $(lastword $(MAKEFILE_LIST))))
-MAKE_ARCH=/home/koder/workspace/pet/agent/agent/make_arch.py
+ARCH_LIB=$(dir $(abspath $(shell python -c "import koder_utils ; print(koder_utils.__file__)")))
 
 
 mypy:
@@ -22,7 +22,7 @@ pylint_e:
 		python3 -m pylint -E '${PYLINT_FMT}' --rcfile=pylint.rc ${ALL_FILES}
 
 archive:
-		python3 '${MAKE_ARCH}' --config arch_config.txt '${CURR_PATH}' '${CURR_PATH}/binary/ceph_report.sh'
+		python3 '${ARCH_LIB}/tools/make_arch.py' --config arch_config.txt '${CURR_PATH}' '${CURR_PATH}/binary/ceph_report.sh'
 
 whl:
 		python3 setup.py sdist bdist_wheel
