@@ -18,11 +18,8 @@ from typing import Optional, Tuple, Dict, Any, List, Union
 
 import agent
 from agent.client import AsyncRPCClient, IAgentRPCNode
-from cephlib.classes import CephReleases
-from cephlib.discover import discover_report, parse_ceph_version, CephReport
-from koder_utils.storage.storage import make_storage, IStorageNNP
-from koder_utils.rpc_node import IAsyncNode, LocalHost, get_hostname
-from koder_utils.utils import ignore_all
+from cephlib import CephCLI, parse_ceph_version, CephReport, CephRelease
+from koder_utils import make_storage, IStorageNNP, IAsyncNode, LocalHost, get_hostname, ignore_all
 
 from .collectors import (CephOSDCollector, CephMonCollector, CephMasterCollector, NodeCollector,
                          LUMINOUS_MAX_PG, DEFAULT_MAX_PG, AUTOPG)
@@ -85,7 +82,7 @@ def encrypt_and_upload(url: str,
                               stdin=subprocess.PIPE,
                               stderr=subprocess.STDOUT,
                               stdout=subprocess.PIPE,
-                              input=(http_user_password + "\n").encode("utf8"),
+                              input=(http_user_password + "\n").encode(),
                               timeout=timeout)
     except subprocess.TimeoutExpired:
         logger.error(f"Fail to upload data: upload timeout")
@@ -96,10 +93,17 @@ def encrypt_and_upload(url: str,
             os.unlink(enc_report)
 
     if proc.returncode != 0:
-        logger.error(f"Fail to upload data: {proc.stdout.decode('utf8').strip()}")
+        logger.error(f"Fail to upload data: {proc.stdout.decode().strip()}")
         raise ReportFailed()
 
     logger.info("File successfully uploaded")
+
+
+async def start_historic():
+    RADOS_DF = 'rados df -f json'
+    PG_DUMP = 'ceph pg dump -f json 2>/dev/null'
+    CEPH_DF = 'ceph df -f json'
+    CEPH_S = 'ceph -s -f json'
 
 
 def pack_output_folder(out_folder: str, out_file: str):
@@ -200,7 +204,7 @@ async def check_master(conn: IAsyncNode):
         raise ReportFailed()
 
     version = parse_ceph_version(await conn.run_str('ceph --version'))
-    if version.release < CephReleases.jewel:
+    if version.release < CephRelease.jewel:
         logger.error(f"Too old ceph version {version!r}, only jewel and later ceph supported")
         raise ReportFailed()
 

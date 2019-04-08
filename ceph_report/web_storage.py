@@ -127,7 +127,7 @@ async def handle_list(target_dir: str, request: web.Request):
 
 @download
 async def handle_get(target_dir: str, request: web.Request):
-    target_name = (await request.read()).decode("utf8")
+    target_name = (await request.read()).decode()
 
     if not allowed_file_name(target_name):
         return web.HTTPBadRequest(reason=f"Incorrect file name: {target_name}")
@@ -137,7 +137,7 @@ async def handle_get(target_dir: str, request: web.Request):
 
 @download
 async def handle_del(target_dir: str, request: web.Request):
-    target_name = (await request.read()).decode("utf8")
+    target_name = (await request.read()).decode()
 
     if not allowed_file_name(target_name):
         return web.HTTPBadRequest(reason=f"Incorrect file name: {target_name}")

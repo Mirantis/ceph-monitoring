@@ -57,7 +57,7 @@ def get_img(plt: Any, format: str = 'svg') -> AnyStr:
     img_svg = bio.getvalue()
     img_start = img_start1 if img_start1 in img_svg else img_start2
     assert img_start in img_svg, "SVG format of matplotlib output has changed, update code accordingly"
-    return bio.getvalue().split(img_start, 1)[1].decode("utf8")  # type: ignore
+    return bio.getvalue().split(img_start, 1)[1].decode()  # type: ignore
 
 
 def plot_img(func: Callable, *args, **kwargs) -> str:
@@ -446,7 +446,7 @@ def plot_crush_rules(ceph: CephInfo, report: Report):
             dot += "\n    ".join(make_dot(root_node, idmap, id_prefix=rule_name + "_")) + "\n}"
 
             try:
-                svg = subprocess.check_output("neato -Tsvg", shell=True, input=dot.encode('utf8')).decode("utf8")
+                svg = subprocess.check_output("neato -Tsvg", shell=True, input=dot.encode()).decode()
             except subprocess.CalledProcessError as exc:
                 logger.error("Failed to convert .dot to svg with 'neato -Tsvg': %s\n%s", exc, dot)
                 svg = None

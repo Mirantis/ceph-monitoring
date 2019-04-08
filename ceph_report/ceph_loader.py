@@ -384,8 +384,7 @@ class CephLoader:
                         status_regions=status_regions)
 
     def load_osd_procinfo(self, osd_id: int) -> OSDProcessInfo:
-        cmdln = [i.decode("utf8")
-                 for i in self.storage.raw.get_raw('osd/{0}/cmdline.bin'.format(osd_id)).split(b'\x00')]
+        cmdln = [i.decode() for i in self.storage.raw.get_raw(f'osd/{osd_id}/cmdline.bin').split(b'\x00')]
 
         pinfo = self.storage.json.osd[str(osd_id)].procinfo
 
@@ -436,7 +435,7 @@ class CephLoader:
         try:
             fc = self.storage.txt.master.osd_versions
         except:
-            fc = self.storage.raw.get_raw('master/osd_versions.err').decode("utf8")
+            fc = self.storage.raw.get_raw('master/osd_versions.err').decode()
 
         osd_versions: Dict[int, CephVersion] = {}
 

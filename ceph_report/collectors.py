@@ -13,15 +13,9 @@ from typing import Any, Union, List, Dict, Optional, Tuple, Iterator
 from agent.client import IAgentRPCNode
 from dataclasses import dataclass
 
-from cephlib.classes import CephReleases
-from cephlib.commands import parse_ceph_volumes_js, parse_ceph_disk_js
-from koder_utils.storage.istorage_nnp import IStorageNNP
-from koder_utils.cli import CMDResult
-from koder_utils.rpc_node import IAsyncNode
-
-from koder_utils.linux import parse_devices_tree, parse_sockstat_file, parse_info_file_from_proc, get_host_interfaces
-from cephlib.discover import CephReport
-from koder_utils.utils import ignore_all
+from cephlib import CephRelease, parse_ceph_volumes_js, parse_ceph_disk_js, CephReport, CephCmd
+from koder_utils import (IStorageNNP, CMDResult, IAsyncNode, parse_devices_tree, parse_sockstat_file,
+                         parse_info_file_from_proc, get_host_interfaces, ignore_all)
 
 logger = logging.getLogger('collect')
 
@@ -36,7 +30,7 @@ async def get_sock_count(conn: IAgentRPCNode, pid: int) -> int:
 async def get_device_for_file(conn: IAgentRPCNode, fname: str) -> Tuple[str, str]:
     """Find storage device, on which file is located"""
 
-    dev = (await conn.conn.fs.get_dev_for_file(fname)).decode('utf8')
+    dev = (await conn.conn.fs.get_dev_for_file(fname)).decode()
     assert dev.startswith('/dev'), "{!r} is not starts with /dev".format(dev)
     root_dev = dev = dev.strip()
     rr = re.match('^(/dev/[shv]d.*?)\\d+', root_dev)
@@ -119,7 +113,7 @@ class Collector:
         if res.returncode != 0:
             logger.warning(f"Cmd {cmd} failed {self.node} with code {res.returncode}")
             data_format = 'err'
-            save = res.stdout + res.stderr_b.decode("utf8")
+            save = res.stdout + res.stderr_b.decode()
         else:
             save = res.stdout
 
@@ -161,12 +155,13 @@ class CephMasterCollector(Collector, CephBase):
         return self.__class__(storage, self.opts, self.node, self.hostname, self.report)
 
     async def collect(self) -> None:
+        # TODO: this should not be here
         time2 = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
         curr_data = f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n{time2}\n{time.time()}"
         self.save("collected_at", 'txt', 0, curr_data)
         self.save("report", 'json', 0, json.dumps(self.report.raw))
 
-        pre_luminous = self.report.version.release < CephReleases.luminous
+        pre_luminous = self.report.version.release < CephRelease.luminous
         if pre_luminous:
             await self.run_and_save_output("osd_versions_old", self.ceph_cmd_txt + "tell 'osd.*' version", "txt")
             await self.run_and_save_output("mon_versions_old", self.ceph_cmd_txt + "tell 'mon.*' version", "txt")
@@ -255,6 +250,30 @@ class CephMasterCollector(Collector, CephBase):
         for cmd in ("status", "osd tree", "df", "osd df", "rados df", "osd dump", "osd blocked-by"):
             await self.run_and_save_output(cmd.replace(" ", "_"), self.ceph_cmd_txt + cmd, 'txt')
         await self.run_and_save_output("-s", "ceph_s", 'txt')
+
+
+async def collect_rbd_volumes_info(report, ceph_report: CephReport):
+    logger.debug("Collecting RBD volumes stats")
+    for pool in report.raw["osdmap"]["pools"]:
+        if 'application_metadata' in pool:
+            if 'rbd' not in pool.get('application_metadata'):
+                continue
+        elif 'rgw' in pool['pool_name']:
+            continue
+
+        name = pool['pool_name']
+
+        await collector(f'rbd_du_{name}').rbd("du")
+
+        sep = '-' * 60
+        cmd = f'for image in $(rbd list -p rbd) ; do echo "{sep}" ; " + \
+            f"echo "$image" ; {self.rbd_cmd} info "$image" ; done'
+        await collector(f"rbd_images_{name}").bash(cmd)
+        await collector(f"rbd_images_{name}").ceph_js(cmd)
+        await collector(f"rbd_images_{name}").ceph(cmd)
+
+        await self.run_and_save_output(, cmd, "txt")
+
 
 
 class CephOSDCollector(Collector, CephBase):
@@ -367,7 +386,7 @@ class CephOSDCollector(Collector, CephBase):
 
     async def collect_process_info(self, pid: int):
 
-        cmdline = (await self.node.read(f'/proc/{pid}/cmdline')).decode('utf8')
+        cmdline = (await self.node.read(f'/proc/{pid}/cmdline')).decode()
         opts = cmdline.split("\x00")
         for op, val in zip(opts[:-1], opts[1:]):
             if op in ('-i', '--id'):
@@ -383,41 +402,41 @@ class CephOSDCollector(Collector, CephBase):
         osd_proc_info['fd_count'] = len(list(await self.node.iterdir(pid_dir + "fd")))
 
         fpath = pid_dir + "net/sockstat"
-        ssv4 = parse_sockstat_file((await self.node.read(fpath)).decode('utf8'))
+        ssv4 = parse_sockstat_file((await self.node.read(fpath)).decode())
         if not ssv4:
             logger.warning(f"Broken file {fpath!r} on node {self.node}")
         else:
             osd_proc_info['ipv4'] = ssv4
 
         fpath = pid_dir + "net/sockstat6"
-        ssv6 = parse_sockstat_file((await self.node.read(fpath)).decode('utf8'))
+        ssv6 = parse_sockstat_file((await self.node.read(fpath)).decode())
         if not ssv6:
             logger.warning("Broken file {!r} on node {}".format(fpath, self.node))
         else:
             osd_proc_info['ipv6'] = ssv6
         osd_proc_info['sock_count'] = await self.node.conn.fs.count_sockets_for_process(pid)
 
-        proc_stat = (await self.node.read(pid_dir + "status")).decode('utf8')
+        proc_stat = (await self.node.read(pid_dir + "status")).decode()
         self.save("proc_status", "txt", 0, proc_stat)
         osd_proc_info['th_count'] = int(proc_stat.split('Threads:')[1].split()[0])
 
         # IO stats
-        io_stat = (await self.node.read(pid_dir + "io")).decode('utf8')
+        io_stat = (await self.node.read(pid_dir + "io")).decode()
         osd_proc_info['io'] = parse_info_file_from_proc(io_stat)
 
         # Mem stats
-        mem_stat = (await self.node.read(pid_dir + "status")).decode('utf8')
+        mem_stat = (await self.node.read(pid_dir + "status")).decode()
         osd_proc_info['mem'] = parse_info_file_from_proc(mem_stat)
 
         # memmap
-        mem_map = (await self.node.read(pid_dir + "maps", compress=True)).decode('utf8')
+        mem_map = (await self.node.read(pid_dir + "maps", compress=True)).decode()
         osd_proc_info['memmap'] = []
         for ln in mem_map.strip().split("\n"):
             mem_range, access, offset, dev, inode, *pathname = ln.split()
             osd_proc_info['memmap'].append([mem_range, access, " ".join(pathname)])
 
         # sched
-        sched = (await self.node.read(pid_dir + "sched", compress=True)).decode('utf8')
+        sched = (await self.node.read(pid_dir + "sched", compress=True)).decode()
         try:
             data = "\n".join(sched.strip().split("\n")[2:])
             osd_proc_info['sched'] = parse_info_file_from_proc(data, ignore_err=True)
@@ -425,7 +444,7 @@ class CephOSDCollector(Collector, CephBase):
             osd_proc_info['sched'] = {}
             osd_proc_info['sched_raw'] = sched
 
-        stat = (await self.node.read(pid_dir + "stat")).decode('utf8')
+        stat = (await self.node.read(pid_dir + "stat")).decode()
         osd_proc_info['stat'] = stat.split()
 
         self.save("procinfo", "json", 0, json.dumps(osd_proc_info))

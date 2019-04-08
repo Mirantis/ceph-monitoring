@@ -374,10 +374,9 @@ def load_perf_monitoring(storage: TypedStorage) -> Tuple[Optional[Dict[int, List
                 if ext == 'json' and sensor == 'ceph' and metric == 'perf_dump':
                     osd_id = osd_rr.match(dev_or_osdid)
                     assert osd_id, "{0!r} don't match osdXXX name".format(dev_or_osdid)
-                    assert osd_id.group(1) not in osd_perf_dump, "Two set of perf_dump data for osd {0}"\
-                        .format(osd_id.group(1))
+                    assert osd_id.group(1) not in osd_perf_dump, f"Two set of perf_dump data for osd {osd_id.group(1)}"
                     path = "perf_monitoring/{0}/{1}".format(host_id, fname)
-                    osd_perf_dump[int(osd_id.group(1))] = json.loads(storage.raw.get_raw(path).decode("utf8"))
+                    osd_perf_dump[int(osd_id.group(1))] = json.loads(storage.raw.get_raw(path).decode())
                     continue
                 elif ext == 'bin' and sensor == 'ceph' and metric == 'historic':
                     osd_id = osd_rr.match(dev_or_osdid)

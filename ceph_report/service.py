@@ -54,7 +54,7 @@ def main(argv: List[str]):
 
             res.check_returncode()
             marker = "Will store results into"
-            stdout = res.stdout.decode("utf8")
+            stdout = res.stdout.decode()
 
             if marker not in stdout:
                 continue

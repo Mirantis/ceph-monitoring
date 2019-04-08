@@ -42,13 +42,13 @@ class Report:
 
         if local:
             if embed:
-                data = open(fname, 'rb').read().decode("utf8")
+                data = open(fname, 'rb').read().decode()
             else:
                 assert output_dir is not None
                 shutil.copyfile(fname, output_dir / Path(fname).name)
         else:
             try:
-                data = urllib.request.urlopen(fname, timeout=10).read().decode("utf8")
+                data = urllib.request.urlopen(fname, timeout=10).read().decode()
             except (TimeoutError, URLError):
                 logger.warning(f"Can't retrieve {fname}")
 
