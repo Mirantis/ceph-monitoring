@@ -8,21 +8,19 @@ import os.path
 import argparse
 import datetime
 import tempfile
-import traceback
 import subprocess
 import logging.config
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Callable, Coroutine, NamedTuple
-from typing import Optional, Tuple, Dict, Any, List, Union
+from typing import Coroutine, AsyncIterable, TypeVar
+from typing import Optional, Tuple, Dict, Any, List
 
 import agent
-from agent.client import AsyncRPCClient, IAgentRPCNode
-from cephlib import CephCLI, parse_ceph_version, CephReport, CephRelease
-from koder_utils import make_storage, IStorageNNP, IAsyncNode, LocalHost, get_hostname, ignore_all
+from agent import ConnectionPool
+from cephlib import parse_ceph_version, CephReport, CephRelease, CephCLI, get_ceph_version
+from koder_utils import make_storage, IStorageNNP, IAsyncNode, LocalHost, get_hostname, ignore_all, get_all_ips
 
-from .collectors import (CephOSDCollector, CephMonCollector, CephMasterCollector, NodeCollector,
-                         LUMINOUS_MAX_PG, DEFAULT_MAX_PG, AUTOPG)
+from .collectors import LUMINOUS_MAX_PG, DEFAULT_MAX_PG, AUTOPG, ALL_COLLECTORS, Role, CephCollector, Collector
 from .utils import CLIENT_NAME_RE, CLUSTER_NAME_RE, re_checker, read_inventory, get_file, setup_logging
 from .prom_query import get_block_devs_loads
 
@@ -42,29 +40,34 @@ class ExceptionWithNode(Exception):
     hostname: str
 
 
-async def get_collectors(storage: IStorageNNP,
-                         opts: Any,
-                         master: IAsyncNode,
-                         nodes: List[IAgentRPCNode],
-                         report: CephReport) -> List[Tuple[Callable[[], Coroutine[Any, Any, None]], str]]:
+async def get_collectors(storage: IStorageNNP, opts: Any, master_hostname: str, pool: ConnectionPool,
+                         inventory: List[str],
+                         report: CephReport) -> AsyncIterable[Tuple[Optional[str], Coroutine[Any, Any, None]]]:
 
-    hostname = await get_hostname(master)
-    res = [(CephMasterCollector(storage, opts, master, hostname, report).collect, hostname)]
+    for func in ALL_COLLECTORS[Role.base]:
+        yield None, func(Collector(storage, None, opts, pool))
 
     mon_nodes = {mon.name for mon in report.mons}
     osd_nodes = {osd.hostname for osd in report.osds}
 
+    for func in ALL_COLLECTORS[Role.ceph_master]:
+        yield master_hostname, func(CephCollector(storage.sub_storage("master"), master_hostname, opts, pool, report))
+
     if not opts.ceph_master_only:
-        for node in nodes:
-            hostname = await get_hostname(master)
+        for node in inventory:
+            async with pool.connection(node) as conn:
+                hostname = await get_hostname(conn)
+
             if hostname in mon_nodes:
-                res.append((CephOSDCollector(storage, opts, node, hostname, report).collect, hostname))
+                for func in ALL_COLLECTORS[Role.ceph_mon]:
+                    yield hostname, func(CephCollector(storage.sub_storage(f"mon/{node}"), node, opts, pool, report))
 
             if hostname in osd_nodes:
-                res.append((CephMonCollector(storage, opts, node, hostname, report).collect, hostname))
+                for func in ALL_COLLECTORS[Role.ceph_osd]:
+                    yield hostname, func(CephCollector(storage, node, opts, pool, report))
 
-            res.append((NodeCollector(storage, opts, node, hostname).collect, hostname))
-    return res
+            for func in ALL_COLLECTORS[Role.node]:
+                yield hostname, func(Collector(storage.sub_storage(f"hosts/{node}"), node, opts, pool))
 
 
 def encrypt_and_upload(url: str,
@@ -209,9 +212,12 @@ async def check_master(conn: IAsyncNode):
         raise ReportFailed()
 
 
-async def raise_with_node(func, hostname: str) -> None:
+T = TypeVar('T')
+
+
+async def raise_with_node(coro: Coroutine[Any, Any, T], hostname: str) -> T:
     try:
-        await func()
+        return await coro
     except Exception as local_exc:
         raise ExceptionWithNode(local_exc, hostname) from local_exc
 
@@ -234,58 +240,63 @@ async def run_collection(opts: Any, inv_path: Optional[str], output_folder: Opti
 
     inventory = list(read_inventory(inv_path))
 
-    conn_pool = ConnectionPool(api_key, certificates, max_conn_per_node=opts.max_conn)
+    conn_pool = ConnectionPool(certificates, max_conn_per_node=opts.max_conn, api_key=api_key)
 
     failed = []
-    for node in inventory:
+    good_hosts = []
+    for hostname in inventory:
         try:
-            conn = await conn_pool.get_conn(node)
+            async with conn_pool.connection(hostname) as conn:
+                await conn.conn.sys.ping("test")
+            good_hosts.append(hostname)
         except:
-            failed.append(node)
-
-        conn_pool.release_conn(node, conn)
+            failed.append(hostname)
 
     if failed and opts.must_connect_to_all:
         for ip_or_hostname, err in failed:
             logger.error(f"Can't connect to extra node {ip_or_hostname}: {err}")
         raise ReportFailed()
 
-    # find master
+    args = opts.ceph_extra.split()
+
+    async def get_report(node_conn: IAsyncNode) -> CephReport:
+        await check_master(node_conn)
+        version = await get_ceph_version(node_conn, args)
+        return await CephCLI(node_conn, args, opts.cmd_timeout, version.release).discover_report()
+
     if opts.ceph_master == 'localhost':
-        master_node_l = LocalHost()
+        ceph_report = await get_report(LocalHost())
     else:
-        name = inventory[0] if opts.ceph_master == '-' else opts.ceph_master
-        master_node_l = [conn for conn in conns if conn.conn_addr == name]
+        async with conn_pool.connection(opts.ceph_master) as conn:
+            ceph_report = await get_report(conn)
 
-    if len(master_node_l) != 1:
-        logger.error(f"Inventory empty or has duplicated nodes or empty")
-        raise ReportFailed()
-
-    master_node = master_node_l[0]
-
-    await check_master(master_node)
-
-    if opts.ceph_master_only:
-        return
-    else:
-        ceph_report = await discover_report(master_node, opts)
-
-        logger.info(f"Found {len(ceph_report.osds)} nodes with osds")
-        logger.info(f"Found {len(ceph_report.mons)} nodes with mons")
-        logger.info(f"Run with {len(conns)} hosts in total")
-
-    nodes = ...
+    logger.info(f"Found {len(ceph_report.osds)} nodes with osds")
+    logger.info(f"Found {len(ceph_report.mons)} nodes with mons")
+    logger.info(f"Run with {len(good_hosts)} hosts in total")
 
     # This variable is updated from main function
     if opts.detect_only:
+        logger.info(f"Exiting, as detect-only mode requested")
         return
 
-    storage.put_raw(json.dumps([node.dct() for node in nodes]).encode('utf8'), "hosts.json")
+    nodes_info = []
+    for node in good_hosts:
+        async with conn_pool.connection(node) as conn:
+            nodes_info.append({
+                'name': await get_hostname(conn),
+                'ssh_enpoint': node,
+                'all_ips': await get_all_ips(conn)
+            })
 
-    all_coros = await get_collectors(storage, opts, master_node, nodes, ceph_report)
+    storage.put_raw(json.dumps(nodes_info).encode(), "hosts.json")
+
+    collectors_coro = get_collectors(storage=storage, opts=opts, pool=conn_pool, inventory=good_hosts,
+                                     report=ceph_report, master_hostname=opts.ceph_master)
+    all_coros = [(hostname, coro) async for hostname, coro in collectors_coro]
 
     try:
-        await asyncio.gather(*(raise_with_node(func, node) for func, node in all_coros), return_exceptions=False)
+        await asyncio.gather(*(raise_with_node(coro, hostname) for hostname, coro in all_coros),
+                             return_exceptions=False)
     except ExceptionWithNode as exc:
         logger.error(f"Exception happened during collecting from node {exc.hostname} (see full tb below): {exc.exc}")
         raise
@@ -294,24 +305,29 @@ async def run_collection(opts: Any, inv_path: Optional[str], output_folder: Opti
         raise
     finally:
         logger.info("Collecting logs and teardown RPC servers")
-        for node in nodes:
+        for node in good_hosts:
             with ignore_all:
-                storage.put_raw((await node.rpc_conn.sys.get_logs()).encode('utf8'), f"rpc_logs/{node.name}.txt")
+                async with conn_pool.connection(node) as conn:
+                    storage.put_raw((await conn.conn.sys.get_logs()).encode(), f"rpc_logs/{node}.txt")
 
-    logger.info(f"Totally collected data from {len(nodes)} nodes")
+    logger.info(f"Totally collected data from {len(good_hosts)} nodes")
 
-    for node in sorted(nodes, key=lambda x: x.hostname):
-        if node.osds and node.mon:
-            logger.info(f"Node {node.hostname} has mon and {len(node.osds)} osds")
-        elif node.osds:
-            logger.info(f"Node {node.hostname} has {len(node.osds)} osds")
-        elif node.mon:
-            logger.info(f"Node {node.hostname} has mon")
+    mon_nodes = {mon.name for mon in ceph_report.mons}
+    osd_nodes = {osd.hostname for osd in ceph_report.osds}
 
-    logger.info("Totally found %s monitors, %s OSD nodes with %s OSD daemons",
-                sum(1 for node in nodes if node.mon),
-                sum(1 for node in nodes if node.osds),
-                sum(len(node.osds) for node in nodes if node.osds))
+    osd_count = {hostname: sum(1 for osd in ceph_report.osds if osd.hostname == hostname) for hostname in osd_nodes}
+    mon_count = {hostname: sum(1 for mon in ceph_report.mons if mon.name == hostname) for hostname in mon_nodes}
+
+    for node in sorted(good_hosts):
+        if node in mon_nodes and node in osd_nodes:
+            logger.info(f"Node {node} has mon and {osd_count[node]} osds")
+        elif node in osd_nodes:
+            logger.info(f"Node {node} has {osd_count[node]} osds")
+        elif node in mon_nodes:
+            logger.info(f"Node {node} has mon")
+
+    logger.info(f"Totally found {len(mon_count)} monitors, {len(osd_count)} " +
+                f"OSD nodes with {sum(osd_count.values())} OSD daemons")
 
     if output_folder and opts.prometheus:
         await collect_prom(opts.prometheus, inventory, Path(output_folder), opts.prometheus_interval)

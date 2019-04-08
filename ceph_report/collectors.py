@@ -1,4 +1,3 @@
-import abc
 import os
 import re
 import time
@@ -7,57 +6,60 @@ import array
 import random
 import logging
 import datetime
+import functools
 import contextlib
-from typing import Any, Union, List, Dict, Optional, Tuple, Iterator
+import collections
+from enum import IntEnum
+from dataclasses import dataclass, field
+from typing import Any, List, Dict, Optional, Tuple, Iterator, TypeVar, Callable, Coroutine
 
-from agent.client import IAgentRPCNode
-from dataclasses import dataclass
-
-from cephlib import CephRelease, parse_ceph_volumes_js, parse_ceph_disk_js, CephReport, CephCmd
-from koder_utils import (IStorageNNP, CMDResult, IAsyncNode, parse_devices_tree, parse_sockstat_file,
+from agent import IAgentRPCNode, ConnectionPool
+from cephlib import CephRelease, parse_ceph_volumes_js, parse_ceph_disk_js, CephReport
+from koder_utils import (IStorageNNP, CMDResult, parse_devices_tree, parse_sockstat_file,
                          parse_info_file_from_proc, get_host_interfaces, ignore_all)
+
 
 logger = logging.getLogger('collect')
 
 
 AUTOPG = -1
+DEFAULT_MAX_PG = 2 ** 15
+LUMINOUS_MAX_PG = 2 ** 17
 
 
-async def get_sock_count(conn: IAgentRPCNode, pid: int) -> int:
-    return await conn.conn.fs.count_sockets_for_process(pid)
+VT = TypeVar('VT', str, bytes, array.array)
 
 
-async def get_device_for_file(conn: IAgentRPCNode, fname: str) -> Tuple[str, str]:
-    """Find storage device, on which file is located"""
-
-    dev = (await conn.conn.fs.get_dev_for_file(fname)).decode()
-    assert dev.startswith('/dev'), "{!r} is not starts with /dev".format(dev)
-    root_dev = dev = dev.strip()
-    rr = re.match('^(/dev/[shv]d.*?)\\d+', root_dev)
-    if rr:
-        root_dev = rr.group(1)
-    return root_dev, dev
+class StorFormat(IntEnum):
+    txt = 0
+    json = 1
+    err = 2
+    bin = 3
+    xml = 4
 
 
 @dataclass
 class Collector:
     """Base class for data collectors. Can collect data for only one node."""
-    name: str = "BaseCollector"
+    storage: IStorageNNP
+    hostname: Optional[str]
+    opts: Any
+    pool: ConnectionPool
+    pretty_json: bool = field(init=False, default=False)
+    cmds: Dict[str, Tuple[str, StorFormat]] = field(init=False, default_factory=dict)
 
-    def __init__(self, storage: IStorageNNP, opts: Any, node: IAsyncNode, hostname: str) -> None:
-        self.storage = storage
-        self.hostname = hostname
-        self.opts = opts
-        self.node = node
-        self.pretty_json = self.opts.pretty_json
+    def __post_init__(self) -> None:
+        self.pretty_json = not self.opts.no_pretty_json
+        self.cmds['bash'] = "", StorFormat.txt
 
-    @abc.abstractmethod
-    async def collect(self) -> None:
-        pass
-
-    @abc.abstractmethod
     def with_storage(self, storage: IStorageNNP) -> 'Collector':
-        pass
+        return self.__class__(storage, self.hostname, self.opts, self.pool)
+
+    @contextlib.asynccontextmanager
+    async def connection(self) -> IAgentRPCNode:
+        assert self.hostname is not None
+        async with self.pool.connection(self.hostname) as conn:
+            yield conn
 
     @contextlib.contextmanager
     def chdir(self, path: str) -> Iterator['Collector']:
@@ -71,139 +73,185 @@ class Collector:
     def save_raw(self, path: str, data: bytes):
         self.storage.put_raw(data, path)
 
-    def save(self, path: str, frmt: str, code: int, data: Union[str, bytes, array.array],
-             extra: List[str] = None) -> Union[str, bytes, array.array]:
+    def save(self, path: str, fmt: StorFormat, code: int, data: VT, extra: List[str] = None) -> VT:
         """Save results into storage"""
-        if code == 0 and frmt == 'json' and self.pretty_json:
+        if code == 0 and fmt == StorFormat.json and self.pretty_json:
             assert isinstance(data, (str, bytes))
-            data = json.dumps(json.loads(data), indent=4, sort_keys=True)
+            try:
+                dt = json.loads(data)
+            except json.JSONDecodeError as exc:
+                logger.error(f"Failed to json decode data for path {path}. Err {exc}. Saving json as is")
+            else:
+                data = json.dumps(dt, indent=4, sort_keys=True)
 
-        rpath = "{}.{}".format(path, frmt if code == 0 else "err")
+        rpath = f"{path}.{fmt.name if code == 0 else 'err'}"
 
         if isinstance(data, str):
-            assert extra is None
-            self.save_raw(rpath, data.encode('utf8'))
-        elif isinstance(data, bytes):
+            data = data.encode()
+
+        if isinstance(data, bytes):
             assert extra is None
             self.save_raw(rpath, data)
         elif isinstance(data, array.array):
             self.storage.put_array(rpath, data, extra if extra else [])
         else:
-            raise TypeError("Can't save value of type {!r} (to {!r})".format(type(data), rpath))
+            raise TypeError(f"Can't save value of type {type(data)!r} (to {rpath!r})")
 
         return data
 
-    async def read_and_save(self, path: str, file_path: str, frmt: str = 'txt', compress: bool = True) -> bytes:
-        """Download file from node and save it into storage"""
-        try:
-            content = await self.node.read(file_path, compress=compress)
-            code = 0
-        except (IOError, RuntimeError) as exc:
-            logger.warning("Can't get file %r from node %s. %s", file_path, self.node, exc)
-            content = str(exc)  # type: ignore
-            code = 1
+    async def run(self, *args, **kwargs) -> CMDResult:
+        async with self.connection() as conn:
+            return await conn.run(*args, **kwargs)
 
-        self.save(path, frmt, code, content)
+    async def read_and_save(self, path: str, file_path: str, fmt: StorFormat = StorFormat.txt,
+                            compress: bool = True) -> bytes:
+        """Download file from node and save it into storage"""
+        async with self.connection() as conn:
+            try:
+                content = await conn.read(file_path, compress=compress)
+                code = 0
+            except (IOError, RuntimeError) as exc:
+                logger.warning(f"Can't get file {file_path!r} from node {self.hostname}. {exc}")
+                content = str(exc)  # type: ignore
+                code = 1
+
+        self.save(path, fmt, code, content)
         return content if code == 0 else None  # type: ignore
 
-    async def run_and_save_output(self, path: str, cmd: str, data_format: str = 'txt') -> CMDResult:
+    async def run_and_save_output(self, path: str, cmd: str, fmt: StorFormat = StorFormat.txt) -> CMDResult:
         """Run command on node and store result into storage"""
-        res = await self.node.run(cmd, merge_err=False)
+        async with self.connection() as conn:
+            logger.debug(f"{self.hostname} - {cmd}")
+            res = await conn.run(cmd, merge_err=False)
 
         if res.returncode != 0:
-            logger.warning(f"Cmd {cmd} failed {self.node} with code {res.returncode}")
-            data_format = 'err'
+            logger.warning(f"Cmd {cmd} failed on {self.hostname} with code {res.returncode}")
+            fmt = StorFormat.err
             save = res.stdout + res.stderr_b.decode()
         else:
             save = res.stdout
 
-        try:
-            self.save(path, data_format, res.returncode, save)
-        except json.decoder.JSONDecodeError:
-            print(res.stdout[:20])
-            raise
+        self.save(path, fmt, res.returncode, save)
         return res
 
+    def __call__(self, path: str = None) -> 'CollectorProxy':
+        return CollectorProxy(self, path)
 
-DEFAULT_MAX_PG = 2 ** 15
-LUMINOUS_MAX_PG = 2 ** 17
+    async def run_cmd_and_save_output(self, path: Optional[str], exe: str, args: str,
+                                      fmt: Optional[StorFormat] = None) -> CMDResult:
+        cmd, def_format = self.cmds[exe]
+        if fmt is None:
+            fmt = def_format
+
+        if path is None:
+            path = args.replace(" ", "_").replace("-", '_')
+
+        extra_space = "" if cmd.endswith(" ") else " "
+        return await self.run_and_save_output(path, cmd + extra_space + args, fmt)
 
 
-class CephBase:
-    def __init__(self, report: CephReport, opts: Any):
-        opt = opts.ceph_extra + (" " if opts.ceph_extra else "")
-        self.radosgw_admin_cmd = "radosgw-admin {}".format(opt)
-        self.ceph_cmd = "ceph {}--format json ".format(opt)
-        self.ceph_cmd_txt = "ceph {}".format(opt)
-        self.rbd_cmd = "rbd {} ".format(opt)
-        self.rados_cmd = "rados {}--format json ".format(opt)
-        self.rados_cmd_txt = "rados {}".format(opt)
-        self.report = report
+class CollectorProxy:
+    def __init__(self, collector: Collector, path: str = None) -> None:
+        self.collector = collector
+        self.path = path
+
+    def __getattr__(self, name: str) -> Callable[[str, Optional[StorFormat]], Coroutine[Any, Any, CMDResult]]:
+        assert name in self.collector.cmds
+
+        async def closure(args: str, fmt: Optional[StorFormat] = None) -> CMDResult:
+            return await self.collector.run_cmd_and_save_output(self.path, exe=name, args=args, fmt=fmt)
+
+        return closure
 
 
-class CephMasterCollector(Collector, CephBase):
-    name = 'ceph-master'
-    collect_roles = ['ceph-master']
-    master_collected = False
-    cluster_name = 'ceph'
+@dataclass
+class CephCollector(Collector):
+    report: CephReport
 
-    def __init__(self, storage: IStorageNNP, opts: Any, node: IAsyncNode, hostname: str, report: CephReport) -> None:
-        Collector.__init__(self, storage.sub_storage("master"), opts, node, hostname)
-        CephBase.__init__(self, opts, report)
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        opt = self.opts.ceph_extra + (" " if self.opts.ceph_extra else "")
+        self.cmds['radosgw'] = f"radosgw-admin {opt}", StorFormat.txt
+        self.cmds['ceph_js'] = f"ceph {opt}--format json", StorFormat.json
+        self.cmds['ceph'] = f"ceph {opt}", StorFormat.txt
+        self.cmds['rbd'] = f"rbd {opt}", StorFormat.txt
+        self.cmds['rados_js'] = f"rados {opt}--format json", StorFormat.json
+        self.cmds['rados'] = f"rados {opt}", StorFormat.txt
 
-    def with_storage(self, storage: IStorageNNP) -> 'CephMasterCollector':
-        return self.__class__(storage, self.opts, self.node, self.hostname, self.report)
+    def with_storage(self, storage: IStorageNNP) -> 'CephCollector':
+        return self.__class__(storage, self.hostname, self.opts, self.pool, self.report)
 
-    async def collect(self) -> None:
-        # TODO: this should not be here
-        time2 = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-        curr_data = f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n{time2}\n{time.time()}"
-        self.save("collected_at", 'txt', 0, curr_data)
-        self.save("report", 'json', 0, json.dumps(self.report.raw))
 
-        pre_luminous = self.report.version.release < CephRelease.luminous
-        if pre_luminous:
-            await self.run_and_save_output("osd_versions_old", self.ceph_cmd_txt + "tell 'osd.*' version", "txt")
-            await self.run_and_save_output("mon_versions_old", self.ceph_cmd_txt + "tell 'mon.*' version", "txt")
+class Role(IntEnum):
+    base = 0
+    ceph_master = 1
+    ceph_osd = 2
+    ceph_mon = 3
+    node = 4
 
-        await self.run_and_save_output("status", self.ceph_cmd + "status", 'json')
 
-        if AUTOPG == self.opts.max_pg_dump_count:
-            max_pg = (DEFAULT_MAX_PG if pre_luminous else LUMINOUS_MAX_PG)
-        else:
-            max_pg = self.opts.max_pg_dump_count
+CollectFunc = Callable[[Collector], Coroutine[Any, Any, None]]
 
-        cmds = ["df", "auth list", "mon_status", "osd perf", "osd df", "node ls", "features", "time-sync-status"]
-        if self.report.raw['num_pg'] > max_pg:
-            logger.warning(f"pg dump skipped, as num_pg ({self.report.raw['num_pg']}) > max_pg_dump_count ({max_pg})." +
-                           " Use --max-pg-dump-count NUM option to change the limit")
-        else:
-            cmds.append("pg dump")
 
-        for cmd in cmds:
-            await self.run_and_save_output(cmd.replace(" ", "_").replace("-", '_'), self.ceph_cmd + cmd, 'json')
+ALL_COLLECTORS: Dict[Role, List[CollectFunc]] = collections.defaultdict(list)
 
-        if not self.opts.no_rbd_info:
-            await self.collect_rbd_volumes_info()
 
-        await self.run_and_save_output("rados_df", self.rados_cmd + "df", 'json')
+def collector(role: Role) -> Callable[[CollectFunc], CollectFunc]:
+    def closure(func: CollectFunc) -> CollectFunc:
+        ALL_COLLECTORS[role].append(func)
+        return func
+    return closure
 
-        if self.opts.collect_rgw:
-            await self.collect_rgw_info()
 
-        await self.run_and_save_output("default_config", self.ceph_cmd_txt + "--show-config", 'txt')
-        await self.run_and_save_output("osd_blocked_by", self.ceph_cmd + "osd blocked-by", "json")
+@collector(Role.base)
+async def collect_base(c: Collector) -> None:
+    time2 = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    curr_data = f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n{time2}\n{time.time()}"
+    c.save("collected_at", StorFormat.txt, 0, curr_data)
 
-        if self.opts.collect_txt:
-            await self.collect_txt()
 
-        if self.opts.collect_maps:
-            await self.collect_crushmap()
-            await self.collect_osd_map()
+@collector(Role.ceph_master)
+async def save_report(c: CephCollector) -> None:
+    c.save("report", StorFormat.json, 0, json.dumps(c.report.raw))
 
-    async def collect_rbd_volumes_info(self):
+
+@collector(Role.ceph_master)
+async def save_versions(c: CephCollector) -> None:
+    pre_luminous = c.report.version.release < CephRelease.luminous
+    if pre_luminous:
+        await c("osd_versions_old").ceph("tell 'osd.*' version")
+        await c("mon_versions_old").ceph("tell 'mon.*' version")
+
+    await c("status").ceph_js("status")
+
+    if AUTOPG == c.opts.max_pg_dump_count:
+        max_pg = (DEFAULT_MAX_PG if pre_luminous else LUMINOUS_MAX_PG)
+    else:
+        max_pg = c.opts.max_pg_dump_count
+
+    cmds = ["df", "auth list", "mon_status", "osd perf", "osd df", "node ls", "features", "time-sync-status"]
+    if c.report.raw['num_pg'] > max_pg:
+        logger.warning(f"pg dump skipped, as num_pg ({c.report.raw['num_pg']}) > max_pg_dump_count ({max_pg})." +
+                       " Use --max-pg-dump-count NUM option to change the limit")
+    else:
+        cmds.append("pg dump")
+
+    for cmd in cmds:
+        await c().ceph_js(cmd)
+
+    await c("rados_df").rados_js("df")
+
+    await c("default_config").ceph("--show-config")
+    await c("osd_blocked_by").ceph_js("osd blocked-by")
+
+
+@collector(Role.ceph_master)
+async def collect_rbd_volumes_info(c: CephCollector) -> None:
+    if c.opts.no_rbd_info:
         logger.debug("Collecting RBD volumes stats")
-        for pool in self.report.raw["osdmap"]["pools"]:
+        rbd_cmd, _ = c.cmds['rbd']
+        sep = '-' * 60
+        for pool in c.report.raw["osdmap"]["pools"]:
             if 'application_metadata' in pool:
                 if 'rbd' not in pool.get('application_metadata'):
                     continue
@@ -211,380 +259,355 @@ class CephMasterCollector(Collector, CephBase):
                 continue
 
             name = pool['pool_name']
-            await self.run_and_save_output(f'rbd_du_{name}', self.rbd_cmd + "du", 'txt')
-            sep = '-' * 60
-            cmd = f'for image in $(rbd list -p rbd) ; do echo "{sep}" ; " + \
-                f"echo "$image" ; {self.rbd_cmd} info "$image" ; done'
-            await self.run_and_save_output(f"rbd_images_{name}", cmd, "txt")
+            await c(f'rbd_du_{name}').rbd(f"du -p {name}")
 
-    async def collect_crushmap(self):
-        temp_fl = "%08X" % random.randint(0, 2 << 64)
-        cr_fname = f"/tmp/ceph_collect.{temp_fl}.cr"
-        crushmap_res = await self.node.run(self.ceph_cmd + f"osd getcrushmap -o {cr_fname}")
+            cmd = f'for image in $(rbd list -p rbd) ; do echo "{sep}" ; " + \
+                f"echo "$image" ; {rbd_cmd} info "$image" ; done'
+            await c(f"rbd_images_{name}").bash(cmd)
+
+
+@collector(Role.ceph_master)
+async def collect_crushmap(c: CephCollector) -> None:
+    if c.opts.collect_maps:
+        cr_fname = f"/tmp/ceph_collect.{'%08X' % random.randint(0, 2 << 64)}.cr"
+        ceph_cmd, _ = c.cmds['ceph']
+        crushmap_res = await c.run(f"{ceph_cmd} osd getcrushmap -o {cr_fname}")
+
         if crushmap_res.returncode != 0:
             logger.error("Fail to get crushmap")
         else:
-            await self.read_and_save('crushmap', cr_fname, 'bin')
-            crushtool_res = await self.node.run(f"crushtool -d {cr_fname} -o {cr_fname}.txt")
+            await c.read_and_save('crushmap', cr_fname, StorFormat.bin)
+            crushtool_res = await c.run(f"crushtool -d {cr_fname} -o {cr_fname}.txt")
             if crushtool_res.returncode != 0:
                 logger.error("Fail to decompile crushmap")
             else:
-                await self.read_and_save('crushmap', cr_fname + ".txt", 'txt')
+                await c.read_and_save('crushmap', cr_fname + ".txt", StorFormat.txt)
 
-    async def collect_osd_map(self):
-        temp_fl = "%08X" % random.randint(0, 2 << 64)
-        osd_fname = f"/tmp/ceph_collect.{temp_fl}.osd"
-        osdmap_res = await self.node.run(self.ceph_cmd + f"osd getmap -o {osd_fname}")
+
+@collector(Role.ceph_master)
+async def collect_osd_map(c: CephCollector) -> None:
+    if c.opts.collect_maps:
+        osd_fname = f"/tmp/ceph_collect.{'%08X' % random.randint(0, 2 << 64)}.osd"
+        ceph_cmd, _ = c.cmds['ceph']
+        osdmap_res = await c.run(f"{ceph_cmd} osd getmap -o {osd_fname}")
         if osdmap_res.returncode != 0:
             logger.error("Fail to get osdmap")
         else:
-            await self.read_and_save('osdmap', osd_fname, 'bin')
-            await self.run_and_save_output('osdmap', f"osdmaptool --print {osd_fname} txt")
+            await c.read_and_save('osdmap', osd_fname, StorFormat.bin)
+            await c.run_and_save_output('osdmap', f"osdmaptool --print {osd_fname}", StorFormat.txt)
 
-    async def collect_rgw_info(self):
-        await self.run_and_save_output("realm_list", self.radosgw_admin_cmd + "realm list", "txt")
-        await self.run_and_save_output("zonegroup_list", self.radosgw_admin_cmd + "zonegroup list", "txt")
-        await self.run_and_save_output("zone_list", self.radosgw_admin_cmd + "zone list", "txt")
 
-    async def collect_txt(self):
+@collector(Role.ceph_master)
+async def collect_rgw_info(c: CephCollector) -> None:
+    if not c.opts.collect_rgw:
+        await c().radosgw("realm list")
+        await c().radosgw("zonegroup list")
+        await c().radosgw("zone list")
+
+
+@collector(Role.ceph_master)
+async def collect_ceph_txt(c: CephCollector) -> None:
+    if c.opts.collect_txt:
         for cmd in ("status", "osd tree", "df", "osd df", "rados df", "osd dump", "osd blocked-by"):
-            await self.run_and_save_output(cmd.replace(" ", "_"), self.ceph_cmd_txt + cmd, 'txt')
-        await self.run_and_save_output("-s", "ceph_s", 'txt')
+            await c().ceph(cmd)
+        await c("ceph_s").ceph("-s")
 
 
-async def collect_rbd_volumes_info(report, ceph_report: CephReport):
-    logger.debug("Collecting RBD volumes stats")
-    for pool in report.raw["osdmap"]["pools"]:
-        if 'application_metadata' in pool:
-            if 'rbd' not in pool.get('application_metadata'):
-                continue
-        elif 'rgw' in pool['pool_name']:
-            continue
-
-        name = pool['pool_name']
-
-        await collector(f'rbd_du_{name}').rbd("du")
-
-        sep = '-' * 60
-        cmd = f'for image in $(rbd list -p rbd) ; do echo "{sep}" ; " + \
-            f"echo "$image" ; {self.rbd_cmd} info "$image" ; done'
-        await collector(f"rbd_images_{name}").bash(cmd)
-        await collector(f"rbd_images_{name}").ceph_js(cmd)
-        await collector(f"rbd_images_{name}").ceph(cmd)
-
-        await self.run_and_save_output(, cmd, "txt")
-
-
-
-class CephOSDCollector(Collector, CephBase):
-    name = 'ceph-ops'
-
-    def __init__(self, storage: IStorageNNP, opts: Any, node: IAgentRPCNode, hostname: str, report: CephReport) -> None:
-        Collector.__init__(self, storage, opts, node, hostname)
-        CephBase.__init__(self, opts, report)
-
-    def with_storage(self, storage: IStorageNNP) -> 'CephOSDCollector':
-        return self.__class__(storage, self.opts, self.node, self.hostname, self.report)
-
-    async def collect(self):
-        # check OSD process status
-        psaux = await self.node.run_str("ps aux | grep ceph-osd")
+@collector(Role.ceph_osd)
+async def collect_osd(c: CephCollector) -> None:
+    # check OSD process status
+    async with c.connection() as conn:
+        psaux = await conn.run_str("ps aux | grep ceph-osd")
         osd_re = re.compile(r".*?\s+(?P<pid>\d+)\s.*?\bceph-osd[\t ]+.*(-i|--id)[\t ]+(?P<osd_id>\d+)")
 
-        running_osds = set()
-        pids = set()
+        running_osds: Dict[int, int] = {}
         for rr in osd_re.finditer(psaux):
-            running_osds.add(int(rr.group('osd_id')))
-            pids.add(int(rr.group('pid')))
+            osd_id = int(rr.group('osd_id'))
+            running_osds[osd_id] = int(rr.group('pid'))
 
-        ids_from_ceph = [meta["id"] for meta in self.report.raw["osd_metadata"] if meta["hostname"] == self.hostname]
-        unexpected_osds = running_osds.difference(ids_from_ceph)
+    ids_from_ceph = [meta["id"] for meta in c.report.raw["osd_metadata"] if meta["hostname"] == c.hostname]
+    unexpected_osds = set(running_osds).difference(ids_from_ceph)
 
-        for osd_id in unexpected_osds:
-            logger.warning(f"Unexpected osd-{osd_id} in node {self.hostname}")
+    for osd_id in unexpected_osds:
+        logger.warning(f"Unexpected osd-{osd_id} in node {c.hostname}")
 
-        path_pp = f"hosts/{self.hostname}"
+    with c.chdir(f"hosts/{c.hostname}") as c_host:
+        cephdisklist_js = await c_host("cephdisk").bash("ceph-disk list --format=json", fmt=StorFormat.json)
+        cephvollist_js = await c_host("cephvolume").bash("ceph-volume lvm list --format=json", fmt=StorFormat.json)
+        lsblk_js = await c_host("lsblk").bash("lsblk -a --json", fmt=StorFormat.json)
 
-        cephdisklist_js = await self.run_and_save_output(f"{path_pp}/cephdisk", "ceph-disk list --format=json", "json")
-        cephvollist_js = await self.run_and_save_output(f"{path_pp}/cephvolume",
-                                                        "ceph-volume lvm list --format=json", "json")
-        lsblk_js = await self.run_and_save_output(f"{path_pp}/lsblk", "lsblk -a --json", "json")
-        await self.run_and_save_output(f"{path_pp}/lsblk", "lsblk -a")
+        await c_host("lsblk").bash("lsblk -a")
 
-        if self.opts.collect_txt:
-            await self.run_and_save_output(f"{path_pp}/cephdisk", "ceph-disk list")
-            await self.run_and_save_output(f"{path_pp}/cephvolume", "ceph-volume lvm list")
+        if c_host.opts.collect_txt:
+            await c_host("cephdisk").bash("ceph-disk list")
+            await c_host("cephvolume").bash("ceph-volume lvm list")
 
-        dev_tree = parse_devices_tree(json.loads(lsblk_js))
+    dev_tree = parse_devices_tree(json.loads(lsblk_js.stdout))
 
-        if cephvollist_js.returncode == 0:
-            devs_for_osd: Dict[int, Dict[str, str]] = parse_ceph_volumes_js(cephvollist_js.stdout)
-        elif cephdisklist_js.returncode == 0:
-            devs_for_osd = parse_ceph_disk_js(cephdisklist_js.stdout)
+    if cephvollist_js.returncode == 0:
+        devs_for_osd: Dict[int, Dict[str, str]] = parse_ceph_volumes_js(cephvollist_js.stdout)
+    elif cephdisklist_js.returncode == 0:
+        devs_for_osd = parse_ceph_disk_js(cephdisklist_js.stdout)
+    else:
+        devs_for_osd = {}
+
+    logger.debug(f"Found next pids for OSD's on node {c.hostname}: {sorted(running_osds.values())}")
+
+    for osd_id in ids_from_ceph:
+        with c.chdir(f'osd/{osd_id}') as c_osd:
+            # TODO: parallelize and wait
+            await collect_osd_info(c_osd, osd_id,
+                                   devs_for_osd.get(osd_id),
+                                   dev_tree,
+                                   running_osds)
+
+            # TODO: parallelize and wait
+            if osd_id in running_osds:
+                pid = running_osds[osd_id]
+                logger.debug(f"Collecting info for osd.{osd_id} with pid {pid}")
+                info = await collect_process_info(c_osd, pid)
+                c_osd.save("proc_info", StorFormat.json, 0, json.dumps(info.__dict__))
+
+
+async def collect_osd_info(c: CephCollector,
+                           osd_id: int,
+                           devs: Optional[Dict[str, str]],
+                           dev_tree: Dict[str, str],
+                           running_osds: Dict[int, int]) -> None:
+
+    await c("log").bash(f"tail -n {c.opts.ceph_log_max_lines} /var/log/ceph/ceph-osd.{osd_id}.log")
+    await c("perf_dump").ceph(f"daemon osd.{osd_id} perf dump")
+    await c("perf_hist_dump").ceph(f"daemon osd.{osd_id} perf histogram dump")
+
+    if osd_id in running_osds:
+        await c("config").ceph(f"daemon osd.{osd_id} config show", StorFormat.json)
+    else:
+        logger.warning(f"osd-{osd_id} in node {c.hostname} is down. No config available")
+
+    if devs:
+        stor_type = devs['store_type']
+
+        if stor_type == 'filestore':
+            data_dev = devs["path"]
+            j_dev = devs["journal_dev"]
+            osd_dev_conf = {'data': data_dev,
+                            'journal': j_dev,
+                            'r_data': dev_tree[data_dev],
+                            'r_journal': dev_tree[j_dev],
+                            'type': stor_type}
         else:
-            devs_for_osd = {}
+            assert stor_type == 'bluestore'
+            data_dev = devs["block_dev"]
+            db_dev = devs.get('block.db_dev', data_dev)
+            wal_dev = devs.get('block.wal_dev', db_dev)
+            osd_dev_conf = {'data': data_dev,
+                            'wal': wal_dev,
+                            'db': db_dev,
+                            'r_data': dev_tree[data_dev],
+                            'r_wal': dev_tree[wal_dev],
+                            'r_db': dev_tree[db_dev],
+                            'type': stor_type}
 
-        for osd in ids_from_ceph:
-            with self.chdir(f'osd/{osd.osd_id}') as collector:
-                await collector.collect_osd_info(osd.osd_id,
-                                                 devs_for_osd.get(osd.osd_id),
-                                                 dev_tree,
-                                                 running_osds)
+    else:
+        osd_dev_conf = {}
 
-        logger.debug(f"Found next pids for OSD's on node {self.hostname}: {pids}")
-        for pid in pids:
-            with self.chdir(f'osd/{pid}') as collector:
-                logger.debug("Collecting info for OSD with pid %s", pid)
-                await collector.collect_process_info(pid)
+    c.save('devs_cfg', StorFormat.json, 0, json.dumps(osd_dev_conf))
 
-    async def collect_osd_info(self, osd_id: int, devs: Optional[Dict[str, str]],
-                               dev_tree: Dict[str, str], running_osds: List[int]) -> None:
 
-        cmd = f"tail -n {self.opts.ceph_log_max_lines} /var/log/ceph/ceph-osd.{osd_id}.log"
-        await self.run_and_save_output("log", cmd)
+@dataclass
+class ProcInfo:
+    cmdline: str
+    fd_count: int
+    socket_stats_v4: Optional[Dict]
+    socket_stats_v6: Optional[Dict]
+    status_raw: str
+    status: Dict[str, str]
+    th_count: int
+    io: Dict[str, str]
+    memmap: List[Tuple[str, str, str]]
+    sched_raw: str
+    sched: Dict[str, str]
+    stat: str
 
-        osd_daemon_cmd = f"ceph --admin-daemon /var/run/ceph/ceph-osd.{osd_id}.asok"
-        await self.run_and_save_output("perf_dump", osd_daemon_cmd + " perf dump")
-        await self.run_and_save_output("perf_hist_dump", osd_daemon_cmd + " perf histogram dump")
 
-        if osd_id in running_osds:
-            ceph_conf_res = await self.run_and_save_output("config",
-                                                           f"ceph daemon osd.{osd_id} config show",
-                                                           "json")
-            assert ceph_conf_res.returncode == 0
-            self.save("config", "json", 0, ceph_conf_res.stdout)
-        else:
-            logger.warning(f"osd-{osd_id} in node {self.hostname} is down. No config available")
+async def collect_process_info(c: Collector, pid: int) -> ProcInfo:
+    async with c.connection() as conn:
+        fpath = f"/proc/{pid}/net/sockstat"
+        socket_stats_v4 = parse_sockstat_file(await conn.read_str(fpath))
+        if not socket_stats_v4:
+            logger.warning(f"Broken sockstat file {fpath!r} on node {c.hostname}")
 
-        if devs:
-            stor_type = devs['store_type']
-
-            if stor_type == 'filestore':
-                data_dev = devs["path"]
-                j_dev = devs["journal_dev"]
-                osd_dev_conf = {'data': data_dev,
-                                'journal': j_dev,
-                                'r_data': dev_tree[data_dev],
-                                'r_journal': dev_tree[j_dev],
-                                'type': stor_type}
-            else:
-                assert stor_type == 'bluestore'
-                data_dev = devs["block_dev"]
-                db_dev = devs.get('block.db_dev', data_dev)
-                wal_dev = devs.get('block.wal_dev', db_dev)
-                osd_dev_conf = {'data': data_dev,
-                                'wal': wal_dev,
-                                'db': db_dev,
-                                'r_data': dev_tree[data_dev],
-                                'r_wal': dev_tree[wal_dev],
-                                'r_db': dev_tree[db_dev],
-                                'type': stor_type}
-
-            self.save('devs_cfg', 'json', 0, json.dumps(osd_dev_conf))
-        else:
-            self.save('devs_cfg', 'json', 0, json.dumps({}))
-
-    async def collect_process_info(self, pid: int):
-
-        cmdline = (await self.node.read(f'/proc/{pid}/cmdline')).decode()
-        opts = cmdline.split("\x00")
-        for op, val in zip(opts[:-1], opts[1:]):
-            if op in ('-i', '--id'):
-                break
-        else:
-            logger.warning(f"Can't get osd id for cmd line {cmdline.replace(chr(0), ' ')}")
-            return
-
-        osd_proc_info = {}  # type: Dict[str, Any]
-
-        pid_dir = f"/proc/{pid}/"
-        self.save("cmdline", "bin", 0, cmdline)
-        osd_proc_info['fd_count'] = len(list(await self.node.iterdir(pid_dir + "fd")))
-
-        fpath = pid_dir + "net/sockstat"
-        ssv4 = parse_sockstat_file((await self.node.read(fpath)).decode())
-        if not ssv4:
-            logger.warning(f"Broken file {fpath!r} on node {self.node}")
-        else:
-            osd_proc_info['ipv4'] = ssv4
-
-        fpath = pid_dir + "net/sockstat6"
-        ssv6 = parse_sockstat_file((await self.node.read(fpath)).decode())
-        if not ssv6:
-            logger.warning("Broken file {!r} on node {}".format(fpath, self.node))
-        else:
-            osd_proc_info['ipv6'] = ssv6
-        osd_proc_info['sock_count'] = await self.node.conn.fs.count_sockets_for_process(pid)
-
-        proc_stat = (await self.node.read(pid_dir + "status")).decode()
-        self.save("proc_status", "txt", 0, proc_stat)
-        osd_proc_info['th_count'] = int(proc_stat.split('Threads:')[1].split()[0])
-
-        # IO stats
-        io_stat = (await self.node.read(pid_dir + "io")).decode()
-        osd_proc_info['io'] = parse_info_file_from_proc(io_stat)
-
-        # Mem stats
-        mem_stat = (await self.node.read(pid_dir + "status")).decode()
-        osd_proc_info['mem'] = parse_info_file_from_proc(mem_stat)
+        fpath = f"/proc/{pid}/net/sockstat6"
+        socket_stats_v6 = parse_sockstat_file(await conn.read_str(fpath))
+        if not socket_stats_v6:
+            logger.warning(f"Broken file {fpath!r} on node {c.hostname}")
 
         # memmap
-        mem_map = (await self.node.read(pid_dir + "maps", compress=True)).decode()
-        osd_proc_info['memmap'] = []
-        for ln in mem_map.strip().split("\n"):
+        mem_map_str = await conn.read_str(f"/proc/{pid}/maps", compress=True)
+        memmap: List[Tuple[str, str, str]] = []
+        for ln in mem_map_str.strip().split("\n"):
             mem_range, access, offset, dev, inode, *pathname = ln.split()
-            osd_proc_info['memmap'].append([mem_range, access, " ".join(pathname)])
+            memmap.append((mem_range, access, " ".join(pathname)))
 
-        # sched
-        sched = (await self.node.read(pid_dir + "sched", compress=True)).decode()
+        proc_stat = await conn.read_str(f"/proc/{pid}/status")
+        sched_raw = await conn.read_str(f"/proc/{pid}/sched")
         try:
-            data = "\n".join(sched.strip().split("\n")[2:])
-            osd_proc_info['sched'] = parse_info_file_from_proc(data, ignore_err=True)
+            data = "\n".join(sched_raw.strip().split("\n")[2:])
+            sched = parse_info_file_from_proc(data, ignore_err=True)
         except:
-            osd_proc_info['sched'] = {}
-            osd_proc_info['sched_raw'] = sched
+            sched = {}
 
-        stat = (await self.node.read(pid_dir + "stat")).decode()
-        osd_proc_info['stat'] = stat.split()
+        return ProcInfo(
+            cmdline=await conn.read_str(f"/proc/{pid}/cmdline"),
+            fd_count=len(list(await conn.iterdir(f"/proc/{pid}/fd"))),
+            socket_stats_v4=socket_stats_v4,
+            socket_stats_v6=socket_stats_v6,
+            status_raw=proc_stat,
+            status=parse_info_file_from_proc(proc_stat),
+            th_count=int(proc_stat.split('Threads:')[1].split()[0]),
+            io=parse_info_file_from_proc(await conn.read_str(f"/proc/{pid}/io")),
+            memmap=memmap,
+            sched_raw=sched_raw,
+            sched=sched,
+            stat=await conn.read_str(f"/proc/{pid}/stat")
+        )
 
-        self.save("procinfo", "json", 0, json.dumps(osd_proc_info))
+
+AVERAGE_BYTES_PER_CEPH_LOG_LINE = 143
 
 
-class CephMonCollector(Collector, CephBase):
-    name = 'ceph-mon'
+@collector(Role.ceph_mon)
+async def collect_mon_info(c: CephCollector) -> None:
+    await c("mon_daemons").bash("ps aux | grep ceph-mon")
 
-    def __init__(self, storage: IStorageNNP, opts: Any, node: IAgentRPCNode, hostname: str, report: CephReport) -> None:
-        Collector.__init__(self, storage.sub_storage(f"mon/{hostname}"), opts, node, hostname)
-        CephBase.__init__(self, opts, report)
-        self.ceph_node = node
+    # tail = f"tail -n {c.opts.ceph_log_max_lines}"
+    # await c("mon_log").bash(f"{tail} /var/log/ceph/ceph-mon.{c.hostname}.log")
+    # await c("ceph_log").bash(f"{tail} /var/log/ceph/ceph.log")
+    # await c("ceph_audit").bash(f"{tail} /var/log/ceph/ceph.audit.log")
 
-    def with_storage(self, storage: IStorageNNP) -> 'CephMonCollector':
-        return self.__class__(storage, self.opts, self.ceph_node, self.hostname, self.report)
+    async with c.connection() as conn:
+        read_size = AVERAGE_BYTES_PER_CEPH_LOG_LINE * c.opts.ceph_log_max_lines
 
-    async def collect(self):
-        await self.run_and_save_output("mon_daemons", "ps aux | grep ceph-mon")
-        tail_ln = f"tail -n {self.opts.ceph_log_max_lines} "
-        await self.run_and_save_output("mon_log", tail_ln + f"/var/log/ceph/ceph-mon.{self.hostname}.log")
-        await self.run_and_save_output("ceph_log", tail_ln + " /var/log/ceph/ceph.log")
+        dt = [chunk async for chunk in conn.tail_file(f"/var/log/ceph/ceph-mon.{c.hostname}.log", read_size)]
+        c.save("mon_log", StorFormat.txt, 0, b"".join(dt).decode())
 
-        log_issues = await self.node.conn.ceph.find_issues_in_ceph_log(self.opts.ceph_log_max_lines)
-        self.save("ceph_log_wrn_err", "txt", 0, log_issues)
+        dt = [chunk async for chunk in conn.tail_file("/var/log/ceph/ceph.log", read_size)]
+        c.save("ceph_log", StorFormat.txt, 0, b"".join(dt).decode())
+
+        dt = [chunk async for chunk in conn.tail_file(f"/var/log/ceph/ceph.audit.log", read_size)]
+        c.save("ceph_audit", StorFormat.txt, 0, b"".join(dt).decode())
+
+        log_issues = await conn.conn.ceph.find_issues_in_ceph_log(c.opts.ceph_log_max_lines)
+        c.save("ceph_log_wrn_err", StorFormat.txt, 0, log_issues)
 
         with ignore_all:
-            issues_count, regions = await self.node.conn.ceph.analyze_ceph_logs_for_issues()
-            self.save("log_issues_count", "json", 0, json.dumps(issues_count))
-            self.save("status_regions", "json", 0, json.dumps(regions))
+            issues_count, regions = await conn.conn.ceph.analyze_ceph_logs_for_issues()
+            c.save("log_issues_count", StorFormat.json, 0, json.dumps(issues_count))
+            c.save("status_regions", StorFormat.json, 0, json.dumps(regions))
 
-        await self.run_and_save_output("ceph_audit", tail_ln + " /var/log/ceph/ceph.audit.log")
-        await self.run_and_save_output("config", self.ceph_cmd + f"daemon mon.{self.hostname} config show",
-                                       data_format='json')
-
-        await self.run_and_save_output("ceph_var_dirs_size", "du -s /var/lib/ceph/m*")
+    await c("config").ceph(f"daemon mon.{c.hostname} config show", fmt=StorFormat.json)
+    await c("ceph_var_dirs_size").bash("du -s /var/lib/ceph/m*")
 
 
-class NodeCollector(Collector):
-    name = 'node'
+@collector(Role.node)
+async def collect_kernel_modules_info(c: Collector) -> None:
+    try:
+        await c().bash("lsmod")
+    except Exception as exc:
+        logger.warning(f"Failed to list kernel modules on node {c.hostname}: {exc}")
+        return
 
+    try:
+        await c("modinfo_all").bash("for name in $(lsmod | awk '{print $1}') ; do modinfo $name ; echo '-----' ; done")
+    except Exception as exc:
+        logger.warning(f"Failed to list kernel modules info on {c.hostname}: {exc}")
+
+
+@collector(Role.node)
+async def collect_common_features(c: Collector) -> None:
     node_commands = [
-        ("df", 'txt', 'df'),
-        ("dmidecode", "txt", "dmidecode"),
-        ("dmesg", "txt", "dmesg"),
-        ("ipa4", "txt", "ip -o -4 a"),
-        ("ipa", "txt", "ip a"),
-        ("ifconfig", "txt", "ifconfig"),
-        ("ifconfig_short", "txt", "ifconfig -s"),
-        ("lshw", "xml", "lshw -xml"),
-        ("lsblk", "txt", "lsblk -O"),
-        ("lsblk_short", "txt", "lsblk"),
-        ("mount", "txt", "mount"),
-        ("netstat", "txt", "netstat -nap"),
-        ("netstat_stat", "txt", "netstat -s"),
-        ("sysctl", "txt", "sysctl -a"),
-        ("uname", "txt", "uname -a"),
+        (None, "df"),
+        (None, "dmidecode"),
+        (None, "dmesg"),
+        ("ipa4", "ip -o -4 a"),
+        ("ipa", "ip a"),
+        (None, "ifconfig"),
+        ("ifconfig_short", "ifconfig -s"),
+        ("lsblk", "lsblk -O"),
+        ("lsblk_short", "lsblk"),
+        (None, "mount"),
+        ("netstat", "netstat -nap"),
+        ("netstat_stat", "netstat -s"),
+        ("sysctl", "sysctl -a"),
+        ("uname", "uname -a"),
     ]
+    for path_offset, cmd in node_commands:
+        await c(path_offset).bash(cmd)
 
-    node_files = [
-        "/proc/diskstats", "/proc/meminfo", "/proc/loadavg", "/proc/cpuinfo", "/proc/uptime", "/proc/vmstat"
-    ]
+    await c("lshw").bash("lshw -xml", fmt=StorFormat.xml)
+
+
+@collector(Role.node)
+async def collect_files(c: Collector) -> None:
+    node_files = ["/proc/diskstats", "/proc/meminfo", "/proc/loadavg", "/proc/cpuinfo", "/proc/uptime", "/proc/vmstat"]
+    for fpath in node_files:
+        await c.read_and_save(os.path.basename(fpath), fpath)
 
     node_renamed_files = [("netdev", "/proc/net/dev"),
                           ("dev_netstat", "/proc/net/netstat"),
                           ("softnet_stat", "/proc/net/softnet_stat"),
                           ("ceph_conf", "/etc/ceph/ceph.conf")]
 
-    def __init__(self, storage: IStorageNNP, opts: Any, node: IAsyncNode, hostname: str) -> None:
-        Collector.__init__(self, storage.sub_storage(f'hosts/{self.hostname}'), opts, node, hostname)
+    for name, fpath in node_renamed_files:
+        await c.read_and_save(name, fpath)
 
-    def with_storage(self, storage: IStorageNNP) -> 'NodeCollector':
-        return self.__class__(storage, self.opts, self.node, self.hostname)
 
-    async def collect(self) -> None:
-        await self.collect_kernel_modules_info()
-        await self.collect_common_features()
-        await self.collect_files()
-        await self.collect_bonds_info()
-        await self.collect_interfaces_info()
-        await self.collect_block_devs()
-        await self.collect_packages()
+@collector(Role.node)
+async def collect_bonds_info(c: Collector) -> None:
+    # collect_bonds_info
+    bondmap = {}
 
-    async def collect_kernel_modules_info(self):
-        try:
-            await self.run_and_save_output("lsmod", "lsmod", data_format="txt")
-        except Exception as exc:
-            logger.warning(f"Failed to list kernel modules on node {self.hostname}: {exc}")
-            return
-
-        try:
-            await self.run_and_save_output(
-                "modinfo_all",
-                "for name in $(lsmod | awk '{print $1}') ; do modinfo $name ; echo '-----' ; done",
-                "txt")
-        except Exception as exc:
-            logger.warning(f"Failed to list kernel modules info on {self.hostname}: {exc}")
-        return
-
-    async def collect_common_features(self):
-        for path_offset, frmt, cmd in self.node_commands:
-            await self.run_and_save_output(path_offset, cmd, data_format=frmt)
-
-    async def collect_files(self):
-        for fpath in self.node_files:
-            await self.read_and_save(os.path.basename(fpath), fpath)
-
-        for name, fpath in self.node_renamed_files:
-            await self.read_and_save(name, fpath)
-
-    async def collect_bonds_info(self):
-        # collect_bonds_info
-        bondmap = {}
-        if await self.node.exists("/proc/net/bonding"):
-            for fname in (await self.node.iterdir("/proc/net/bonding")):
-                await self.read_and_save(f"bond_{fname}", f"/proc/net/bonding/{fname}")
+    async with c.connection() as conn:
+        if await conn.exists("/proc/net/bonding"):
+            for fname in (await conn.iterdir("/proc/net/bonding")):
+                await c.read_and_save(f"bond_{fname}", f"/proc/net/bonding/{fname}")
                 bondmap[fname] = f"bond_{fname}"
-        self.save("bonds", 'json', 0, json.dumps(bondmap))
 
-    async def collect_packages(self):
+    c.save("bonds", StorFormat.json, 0, json.dumps(bondmap))
+
+
+@collector(Role.node)
+async def collect_packages(c: Collector) -> None:
+    async with c.connection() as conn:
         try:
-            if await self.node.exists("/etc/debian_version"):
-                await self.run_and_save_output("packages_deb", "dpkg -l", data_format="txt")
+            if await conn.exists("/etc/debian_version"):
+                await c("packages_deb").bash("dpkg -l")
             else:
-                await self.run_and_save_output("packages_rpm", "yum list installed", data_format="txt")
+                await c("packages_rpm").bash("yum list installed")
         except Exception as exc:
-            logger.warning(f"Failed to download packages information from node {self.node}: {exc}")
+            logger.warning(f"Failed to download packages information from node {c.hostname}: {exc}")
 
-    async def collect_block_devs(self) -> None:
-        bdevs_info = await self.node.conn.fs.get_block_devs_info()
-        bdevs_info = {name: data for name, data in bdevs_info.items()}
+
+@collector(Role.node)
+async def collect_block_devs(c: Collector) -> None:
+    async with c.connection() as conn:
+        bdevs_info_rpc = await conn.conn.fs.get_block_devs_info()
+
+        bdevs_info = {name: data for name, data in bdevs_info_rpc.items()}
+
         for name_prefix in ['loop']:
             for name in bdevs_info:
                 if name.startswith(name_prefix):
                     del bdevs_info[name]
 
         tools = ['hdparm', 'smartctl', 'nvme']
-        missing = [name for exists, name in zip((await self.node.conn.fs.binarys_exists(tools)), tools) if not exists]
+        missing = [name for exists, name in zip((await conn.conn.fs.binarys_exists(tools)), tools) if not exists]
+
+        if missing:
+            logger.warning(f"{','.join(missing)} is not installed on {c.hostname}")
 
         if 'nvme' not in missing:
-            nvme_res = await self.node.run('nvme version')
+            nvme_res = await conn.run('nvme version')
             if nvme_res.returncode != 0:
                 ver: float = 0
             else:
@@ -597,45 +620,47 @@ class NodeCollector(Collector):
             if ver < 1.0:
                 logger.warning(f"Nvme tool too old {ver}, at least 1.0 version is required")
             else:
-                nvme_list_js = await self.run_and_save_output('nvme_list', 'nvme list -o json', data_format='json')
+                nvme_list_js = await conn.run('nvme list -o json')
+                c.save(f'nvme_list', StorFormat.json, 0, nvme_list_js)
                 if nvme_list_js.returncode == 0:
                     try:
                         for dev in json.loads(nvme_list_js.stdout)['Devices']:
                             name = os.path.basename(dev['DevicePath'])
-                            await self.run_and_save_output(f'block_devs/{name}/nvme_smart_log',
-                                                           f"nvme smart-log {dev['DevicePath']} -o json",
-                                                           data_format='json')
+                            nvme_smart_log = await conn.run(f"nvme smart-log {dev['DevicePath']} -o json")
+                            c.save(f'block_devs/{name}/nvme_smart_log', StorFormat.json, 0, nvme_smart_log)
                     except:
                         logging.warning("Failed to process nvme list output")
 
-        if missing:
-            logger.warning(f"{','.join(missing)} is not installed on {self.hostname}")
+    lsblk_res = await c("lsblkjs").bash("lsblk -O -b -J", StorFormat.json)
 
-        lsblk_res = await self.run_and_save_output("lsblkjs", "lsblk -O -b -J", data_format="json")
+    if lsblk_res.returncode == 0:
+        for dev_node in json.loads(lsblk_res.stdout)['blockdevices']:
+            name = dev_node['name']
 
-        if lsblk_res.returncode == 0:
-            for dev_node in json.loads(lsblk_res.stdout)['blockdevices']:
-                name = dev_node['name']
+            if 'hdparm' not in missing:
+                await c(f'block_devs/{name}/hdparm').bash(f"sudo hdparm -I /dev/{name}")
 
-                if 'hdparm' not in missing:
-                    await self.run_and_save_output(f'block_devs/{name}/hdparm', f"sudo hdparm -I /dev/{name}")
+            if 'smartctl' not in missing:
+                await c(f'block_devs/{name}/smartctl').bash(f"sudo smartctl -a /dev/{name}")
 
-                if 'smartctl' not in missing:
-                    await self.run_and_save_output(f'block_devs/{name}/smartctl', f"sudo smartctl -a /dev/{name}")
 
-    async def collect_interfaces_info(self):
+@collector(Role.node)
+async def collect_interfaces_info(c: Collector) -> None:
+    async with c.connection() as conn:
+        info = await get_host_interfaces(conn)
+
         interfaces = {}
-        for is_phy, dev in await get_host_interfaces(self.node):
+        for is_phy, dev in info:
             interface = {'dev': dev, 'is_phy': is_phy}
             interfaces[dev] = interface
 
             if is_phy:
-                ethtool_res = await self.node.run("ethtool " + dev)
+                ethtool_res = await conn.run("ethtool " + dev)
                 if ethtool_res.returncode == 0:
                     interface['ethtool'] = ethtool_res.stdout
 
-                iwconfig_res = await self.node.run("iwconfig " + dev)
+                iwconfig_res = await conn.run("iwconfig " + dev)
                 if iwconfig_res.returncode == 0:
                     interface['iwconfig'] = iwconfig_res.stdout
 
-        self.save('interfaces', 'json', 0, json.dumps(interfaces))
+    c.save('interfaces', StorFormat.json, 0, json.dumps(interfaces))
