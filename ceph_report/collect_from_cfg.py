@@ -3,10 +3,10 @@ import configparser
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import List, Any, Mapping
 
 
-def to_args(section: Dict[str, str]) -> List[str]:
+def to_args(section: Mapping[str, str]) -> List[str]:
     res = []
     for key, val in section.items():
         if val in ('true', 'True', True, 'yes'):
