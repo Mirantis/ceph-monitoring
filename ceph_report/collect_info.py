@@ -14,13 +14,14 @@ import subprocess
 import logging.config
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Coroutine, AsyncIterable, TypeVar, Union
+from typing import Coroutine, AsyncIterable, TypeVar
 from typing import Optional, Tuple, Dict, Any, List
 
 import agent
-from agent import ConnectionPool, HistoricCollectionConfig, BlockType
-from cephlib import parse_ceph_version, CephReport, CephRelease, CephCLI, get_ceph_version
-from koder_utils import make_storage, IStorageNNP, IAsyncNode, LocalHost, get_hostname, ignore_all, get_all_ips, b2ssize
+from agent import ConnectionPool, HistoricCollectionConfig, BlockType, HistoricCollectionStatus, IAgentRPCNode
+from cephlib import parse_ceph_version, CephReport, CephRelease, CephCLI, get_ceph_version, CephRole
+from koder_utils import make_storage, IStorageNNP, IAsyncNode, LocalHost, get_hostname, ignore_all, get_all_ips, \
+    b2ssize, rpc_map
 
 from .collectors import LUMINOUS_MAX_PG, DEFAULT_MAX_PG, AUTOPG, ALL_COLLECTORS, Role, CephCollector, Collector
 from .utils import CLIENT_NAME_RE, CLUSTER_NAME_RE, re_checker, read_inventory, get_file, setup_logging
@@ -142,30 +143,6 @@ def check_and_prepare_paths(opts: Any) -> Tuple[Optional[str], Optional[str]]:
     return output_folder, output_arch
 
 
-def get_api_key(api_key_path: Path) -> str:
-    if not api_key_path.is_file():
-        logger.critical(f"Can't find API key at {api_key_path}")
-        raise ReportFailed(f"Can't find API key at {api_key_path}")
-    return api_key_path.open().read()
-
-
-def get_certificates(certs_folder: Path) -> Dict[str, Path]:
-    certificates: Dict[str, Path] = {}
-
-    if not certs_folder.is_dir():
-        if certs_folder:
-            logger.critical(f"Can't cert folder at {certs_folder}")
-            raise ReportFailed(f"Can't cert folder at {certs_folder}")
-        else:
-            logger.warning(f"Can't cert folder at {certs_folder}")
-
-    for file in certs_folder.glob('agent_server.*.cert'):
-        node_name = file.name.split(".", 1)[1].rsplit(".", 1)[0]
-        certificates[node_name] = file
-
-    return certificates
-
-
 async def collect_prom(prom_url: str, inventory: List[str], target: Path, time_range_hours: int):
     data = await get_block_devs_loads(prom_url, inventory, time_range_hours * 60)
 
@@ -212,29 +189,6 @@ async def get_report(ceph_master: str, pool: ConnectionPool, timeout: float, cep
             return await _get_report(conn)
 
 
-def get_connection_pool(opts: Any) -> ConnectionPool:
-    api_key_path = Path(opts.api_key)
-    api_key = get_api_key(api_key_path)
-    certificates_path = Path(opts.certs_folder)
-    certificates = get_certificates(certificates_path)
-    return ConnectionPool(certificates, max_conn_per_node=opts.max_conn, api_key=api_key)
-
-
-async def check_nodes(inventory: List[str], pool: ConnectionPool) -> Tuple[List[str], List[str]]:
-    failed = []
-    good_hosts = []
-    for hostname in inventory:
-        try:
-            async with pool.connection(hostname) as conn:
-                if "test" == await conn.conn.sys.ping("test"):
-                    good_hosts.append(hostname)
-                else:
-                    failed.append(hostname)
-        except:
-            failed.append(hostname)
-    return good_hosts, failed
-
-
 @dataclass
 class RemoteNodesCfg:
     inventory: Optional[List[str]]
@@ -249,6 +203,14 @@ class RemoteNodesCfg:
     ceph_extra_args_s: str
     ceph_master: str
     osd_in_order: List[str]
+
+    def get_nodes(self, role: CephRole) -> List[str]:
+        if role is CephRole.osd:
+            return self.osd_in_order
+        elif role is CephRole.mon:
+            return sorted(self.mon_nodes)
+        else:
+            assert False, f"Not supported role {role}"
 
 
 async def do_preconfig(opts: Any) -> RemoteNodesCfg:
@@ -384,69 +346,49 @@ MiB = 2 ** 20
 GiB = 2 ** 30
 
 
-async def start_coro(cfg: RemoteNodesCfg, hostname: str, first: bool) -> Any:
-    try:
-        cmds = [f'rados {cfg.ceph_extra_args_s} --format json df',
-                f'ceph {cfg.ceph_extra_args_s} --format json df',
-                f'ceph {cfg.ceph_extra_args_s} --format json -s']
+async def start_coro(cfg: RemoteNodesCfg, conn: IAgentRPCNode, hostname: str) -> None:
+    cmds = [f'rados {cfg.ceph_extra_args_s} --format json df',
+            f'ceph {cfg.ceph_extra_args_s} --format json df',
+            f'ceph {cfg.ceph_extra_args_s} --format json -s']
 
-        osd_ids = cfg.osd_nodes[hostname]
-        async with cfg.conn_pool.connection(hostname) as conn:
-            hst = HistoricCollectionConfig(osd_ids=osd_ids,
-                                           size=cfg.opts.size,
-                                           duration=cfg.opts.duration,
-                                           min_duration=cfg.opts.min_duration,
-                                           dump_unparsed_headers=False,
-                                           pg_dump_timeout=3600 if first else None,
-                                           extra_cmd=cmds if first else [],
-                                           extra_dump_timeout=600 if first else None,
-                                           max_record_file=cfg.opts.max_file_size * MiB,
-                                           min_device_free=cfg.opts.min_disk_free * GiB,
-                                           collection_end_time=time.time() + 24 * 60 * 60,
-                                           packer_name='compact')
+    first = hostname == cfg.osd_in_order[0]
+    osd_ids = cfg.osd_nodes[hostname]
+    hst = HistoricCollectionConfig(osd_ids=osd_ids,
+                                   size=cfg.opts.size,
+                                   duration=cfg.opts.duration,
+                                   min_duration=cfg.opts.min_duration,
+                                   dump_unparsed_headers=False,
+                                   pg_dump_timeout=3600 if first else None,
+                                   extra_cmd=cmds if first else [],
+                                   extra_dump_timeout=600 if first else None,
+                                   max_record_file=cfg.opts.max_file_size * MiB,
+                                   min_device_free=cfg.opts.min_disk_free * GiB,
+                                   collection_end_time=time.time() + 24 * 60 * 60,
+                                   packer_name='compact')
 
-            coro = conn.conn.ceph.start_historic_collection(cfg.opts.storage,
-                                                            cfg.ceph_report.version.release.value,
-                                                            hst,
-                                                            cfg.opts.cmd_timeout)
-            return await coro
-    except Exception as exc:
-        return exc
+    await conn.conn.ceph.start_historic_collection(cfg.opts.storage,
+                                                   cfg.ceph_report.version.release.value,
+                                                   hst,
+                                                   cfg.opts.cmd_timeout)
 
 
 async def start_historic(opts: Any) -> None:
     cfg = await do_preconfig(opts)
-
-    coros = []
-    async with cfg.conn_pool:
-        primary = None
-        for hostname in cfg.osd_in_order:
-            coros.append(start_coro(cfg, hostname, hostname == cfg.osd_in_order[0]))
-
-        for hostname, res in zip(cfg.osd_in_order, await asyncio.gather(*coros)):
-            if isinstance(res, Exception):
-                print(f"{hostname:>20s} {'Primary ' if hostname == primary else ''}Failed to start: {res}")
-            else:
-                print(f"{hostname:>20s} {'Primary ' if hostname == primary else ''}OK")
-
-
-async def status_coro(hostname: str, conn_pool: ConnectionPool) -> Any:
-    try:
-        async with conn_pool.connection(hostname) as conn:
-            return await conn.conn.ceph.get_historic_collection_status()
-    except Exception as exc:
-        return exc
+    async for hostname, res in rpc_map(cfg.conn_pool, start_coro, cfg.get_nodes(CephRole.osd)):
+        prefix = f"{hostname:>20s} {'Primary ' if hostname == cfg.osd_in_order[0] else ''}"
+        if isinstance(res, Exception):
+            print(f"{prefix}Failed to start: {res}")
+        else:
+            print(f"{prefix}OK")
 
 
 async def status_historic(opts: Any) -> None:
+    async def coro(conn: IAgentRPCNode, hostname: str) -> Optional[HistoricCollectionStatus]:
+        return await conn.conn.ceph.get_historic_collection_status()
+
     cfg = await do_preconfig(opts)
-
-    coros = []
     async with cfg.conn_pool:
-        for hostname in cfg.osd_in_order:
-            coros.append(status_coro(hostname, cfg.conn_pool))
-
-        for hostname, res in zip(cfg.osd_in_order, await asyncio.gather(*coros)):
+        async for hostname, res in rpc_map(cfg.conn_pool, coro, cfg.get_nodes(CephRole.osd)):
             if isinstance(res, Exception):
                 print(f"{hostname:>20s} Failed: {res}")
             elif res:
@@ -456,57 +398,50 @@ async def status_historic(opts: Any) -> None:
                 print(f"{hostname:>20s} | {'NOT_RUNNING':>10s} | Unknown")
 
 
-async def stop_coro(hostname: str, conn_pool: ConnectionPool) -> Any:
-    try:
-        async with conn_pool.connection(hostname) as conn:
-            return await conn.conn.ceph.stop_historic_collection()
-    except Exception as exc:
-        return exc
-
-
 async def stop_historic(opts: Any) -> None:
+    async def coro(conn: IAgentRPCNode, hostname: str) -> None:
+        await conn.conn.ceph.stop_historic_collection()
+
     cfg = await do_preconfig(opts)
-
-    coros = []
     async with cfg.conn_pool:
-        for hostname in cfg.osd_nodes:
-            coros.append(stop_coro(hostname, cfg.conn_pool))
-
-        for hostname, res in zip(cfg.osd_in_order, await asyncio.gather(*coros)):
+        async for hostname, res in rpc_map(cfg.conn_pool, coro, cfg.get_nodes(CephRole.osd)):
             if isinstance(res, Exception):
                 print(f"{hostname:>20s} Failed to stop: {res}")
             else:
                 print(f"{hostname:>20s} OK")
 
 
-async def collect_historic_coro(hostname: str, path: Path, conn_pool: ConnectionPool) -> Union[int, Exception]:
-    try:
-        async with conn_pool.connection(hostname) as conn:
-            async with conn.conn.streamed.ceph.get_collected_historic_data(0) as data_iter:
-                with path.open("wb") as fd:
-                    async for tp, chunk in data_iter:
-                        assert tp == BlockType.binary
-                        fd.write(chunk)
-                    return fd.tell()
-    except Exception as exc:
-        return exc
+async def remove_historic(opts: Any) -> None:
+    async def coro(conn: IAgentRPCNode, hostname: str) -> None:
+        await conn.conn.ceph.remove_historic_data()
+
+    cfg = await do_preconfig(opts)
+    async with cfg.conn_pool:
+        async for hostname, res in rpc_map(cfg.conn_pool, coro, cfg.get_nodes(CephRole.osd)):
+            if isinstance(res, Exception):
+                print(f"{hostname:>20s} Failed to clean: {res}")
+            else:
+                print(f"{hostname:>20s} Wiped")
 
 
 async def collect_historic(opts: Any) -> None:
-    cfg = await do_preconfig(opts)
+    async def coro(conn: IAgentRPCNode, hostname: str, path: Path, fname: str) -> int:
+        async with conn.conn.streamed.ceph.get_collected_historic_data(0) as data_iter:
+            with (path / fname.format(hostname=hostname)).open("wb") as fd:
+                async for tp, chunk in data_iter:
+                    assert tp == BlockType.binary
+                    fd.write(chunk)
+                return fd.tell()
 
+    cfg = await do_preconfig(opts)
     path = Path(opts.output_folder)
     if not path.exists():
         path.mkdir(parents=True)
-
     part = get_cluster_name_part(opts.customer, opts.cluster)
+    fname = f"historic_ops.{part}.{{hostname}}.bin"
 
-    coros = []
     async with cfg.conn_pool:
-        for hostname in cfg.osd_in_order:
-            coros.append(collect_historic_coro(hostname, path / f"historic_ops.{part}.{hostname}.bin", cfg.conn_pool))
-
-        for hostname, res in zip(cfg.osd_in_order, await asyncio.gather(*coros)):
+        async for hostname, res in rpc_map(cfg.conn_pool, coro, cfg.get_nodes(CephRole.osd), path=path, fname=fname):
             if isinstance(res, Exception):
                 print(f"{hostname:>20s} Failed to collect: {res}")
             else:
@@ -564,6 +499,7 @@ def parse_args(argv: List[str]) -> Any:
     historic_status = subparsers.add_parser('historic_status', help='Show status of historic collection')
     historic_stop = subparsers.add_parser('historic_stop', help='Show status of historic collection')
     historic_collect = subparsers.add_parser('historic_collect', help='Show status of historic collection')
+    historic_remove = subparsers.add_parser('historic_remove', help='Wipe all records')
 
     # ------------------------------------------------------------------------------------------------------------------
 
@@ -582,7 +518,8 @@ def parse_args(argv: List[str]) -> Any:
 
     # ------------------------------------------------------------------------------------------------------------------
 
-    for parser in (collect_parser, historic_start, historic_stop, historic_collect, historic_status, upload):
+    for parser in (collect_parser, historic_start, historic_stop, historic_collect,
+                   historic_status, upload, historic_remove):
         parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                             help="Console log level, see logging.json for defaults")
         parser.add_argument("--persistent-log", action="store_true",
@@ -601,7 +538,7 @@ def parse_args(argv: List[str]) -> Any:
     # ------------------------------------------------------------------------------------------------------------------
 
     default_certs_folder = Path(agent.__file__).resolve().parent.parent / 'agent_client_keys'
-    for parser in (collect_parser, historic_start, historic_stop, historic_collect, historic_status):
+    for parser in (collect_parser, historic_start, historic_stop, historic_collect, historic_status, historic_remove):
         parser.add_argument("--cmd-timeout", default=60, type=int, help="Cmd's run timeout")
         parser.add_argument("--max-conn", default=16, type=int, help="Max connection per node")
         parser.add_argument("--inventory", metavar='FILE', help="Path to file with list of ssh ip/names of ceph nodes")
@@ -676,6 +613,8 @@ def main(argv: List[str]) -> int:
                 coro = stop_historic(opts)
             elif opts.subparser_name == 'historic_collect':
                 coro = collect_historic(opts)
+            elif opts.subparser_name == 'historic_remove':
+                coro = remove_historic(opts)
             else:
                 print("Not implemented", file=sys.stderr)
                 return 1
