@@ -1,16 +1,12 @@
-#!/usr/bin/env python3.5
 import argparse
-import json
 import sys
 import subprocess
 import time
 from pathlib import Path
-import configparser
-import logging
 import logging.config
 from typing import List, Any
 
-from .collect_from_cfg import to_args
+from . import get_config, setup_logging, get_file
 
 
 logger = logging.getLogger("service")
@@ -20,37 +16,30 @@ NO_CREDS = 'no_creds'
 
 def parse_args(argv: List[str]) -> Any:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("config", default="/etc/mirantis/ceph_report.cfg", help="Config file path  (%(default)s)")
+    parser.add_argument("--config", default=None, help="Config file path")
     return parser.parse_args(argv[1:])
 
 
 def main(argv: List[str]):
     opts = parse_args(argv)
-
-    cfg = configparser.ConfigParser()
-    cfg.read(opts.config)
-    svc_config = cfg['service']
-    logging.config.dictConfig(json.load(open(svc_config['logging'])))
+    cfg = get_config(opts.config)
+    setup_logging(get_file("logging.json"), cfg.log_level, None, cfg.persistent_log)
 
     logger.info(f"Started with {argv}")
 
-    report_every = int(svc_config['report_every'])
-    upload_timeout = int(svc_config['upload_timeout'])
-    report_timeout = int(svc_config['report_timeout'])
-
-    upload_args = to_args(cfg['upload'])
+    upload_args = ["--url", cfg.url, "--http-creds", cfg.http_creds]
 
     next_time = time.time()
 
     while True:
         sleep_time = next_time - time.time()
         time.sleep(sleep_time if sleep_time > 0 else 0)
-        next_time += report_every
+        next_time += cfg.report_every
         try:
-            cmd = [sys.executable, '-m', 'ceph_report.collect_from_cfg']
-            logger.info(f"Started collecting with {cmd}, timeout={report_timeout}")
+            cmd = [sys.executable, '-m', 'ceph_report.collect_info', 'collect', '--config', str(cfg.cfg_file)]
+            logger.info(f"Started collecting with {cmd}, timeout={cfg.report_timeout}")
 
-            res = subprocess.run(cmd, timeout=report_timeout, stdout=subprocess.PIPE)
+            res = subprocess.run(cmd, timeout=cfg.report_timeout, stdout=subprocess.PIPE)
 
             res.check_returncode()
             marker = "Will store results into"
@@ -69,10 +58,10 @@ def main(argv: List[str]):
 
             slink_path.symlink_to(report_path)
 
-            if cfg['upload']['url'] != DONT_UPLOAD:
+            if cfg.url != DONT_UPLOAD:
                 cmd = [sys.executable, "-m", "ceph_report.collect_info", "upload", *upload_args, str(report_path)]
                 logger.info(f"Start upload with {cmd}, timeout={report_path}")
-                subprocess.run(cmd, timeout=upload_timeout).check_returncode()
+                subprocess.run(cmd, timeout=cfg.upload_timeout).check_returncode()
                 logger.info("Upload successful")
                 slink_path.unlink()
             else:

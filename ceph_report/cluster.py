@@ -9,8 +9,8 @@ from typing import Iterable, Iterator, Dict, Any, List, Union, Tuple, Optional
 import numpy
 import dataclasses
 
-from cephlib.units import ssize2b
-from cephlib.storage import AttredStorage, TypedStorage
+from koder_utils import ssize2b
+from koder_utils.storage import AttredStorage, TypedStorage
 
 from .hw_info import parse_hw_info
 from .cluster_classes import (IPANetDevInfo, NetStats, Disk, DiskType, HWModel, LogicBlockDev, BlockDevType, DevPath,

@@ -19,9 +19,10 @@ from .table import Table, ident
 from .report import Report
 from .checks import CheckMessage, Severity, ErrTarget, ServiceType
 from .collect_info import get_file_path
-from .visualize import setup_logging, make_report, prepare_path
+from .visualize import make_report, prepare_path
 from .utils import parse_file_name, FileType, FileInfo, FileInfoId, ClusterId
 from .web_storage import SyncApi
+from . import setup_logging
 
 
 logger = logging.getLogger("index")

@@ -22,7 +22,7 @@ pylint_e:
 		python3 -m pylint -E '${PYLINT_FMT}' --rcfile=pylint.rc ${ALL_FILES}
 
 archive:
-		python3 '${ARCH_LIB}/tools/make_arch.py' --config arch_config.txt '${CURR_PATH}' '${CURR_PATH}/binary/ceph_report.sh'
+		python3  -m koder_utils.tools.make_arch '${CURR_PATH}' '${CURR_PATH}/binary/ceph_report.sh'
 
 whl:
 		python3 setup.py sdist bdist_wheel

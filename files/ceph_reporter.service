@@ -5,7 +5,7 @@ Description=Mirantis ceph reporter service
 WorkingDirectory={INSTALL_FOLDER}
 Environment=PYTHONUNBUFFERED=1
 Type=simple
-ExecStart=/usr/bin/python3.5 {INSTALL_FOLDER}/ceph_report/run.py -- -m ceph_report.service {CONF_FILE}
+ExecStart={AGENT_FOLDER}/python/python3.7 -m ceph_report.service {CONF_FILE}
 StandardOutput=null
 
 [Install]

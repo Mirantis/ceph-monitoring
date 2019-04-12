@@ -13,10 +13,10 @@ from enum import IntEnum
 from dataclasses import dataclass, field
 from typing import Any, List, Dict, Optional, Tuple, TypeVar, Callable, Coroutine
 
-from agent import IAgentRPCNode, ConnectionPool
+from agent import IAgentRPCNode, ConnectionPool, BlockType
 from cephlib import CephRelease, parse_ceph_volumes_js, parse_ceph_disk_js, CephReport
-from koder_utils import (IStorageNNP, CMDResult, parse_devices_tree,
-                         collect_process_info, get_host_interfaces, ignore_all, IAsyncNode)
+from koder_utils import (IStorageNNP, CMDResult, parse_devices_tree, collect_process_info, get_host_interfaces,
+                         ignore_all, IAsyncNode, b2ssize)
 
 
 logger = logging.getLogger('collect')
@@ -241,6 +241,29 @@ async def save_versions(c: CephCollector) -> None:
     coros.append(c("osd_blocked_by").ceph_js("osd blocked-by"))
 
     await asyncio.wait(coros)
+
+
+@collector(Role.ceph_osd)
+async def collect_historic(c: CephCollector) -> Dict[str, bool]:
+    if c.opts.historic:
+        async with c.connection() as conn:
+            logger.debug(f"Collecting historic ops from {c.hostname}")
+            fd = c.storage.get_fd(f"historic/{c.hostname}.bin", "cb")
+            try:
+                size = 0
+                async with conn.conn.streamed.ceph.get_collected_historic_data(0) as data_iter:
+                    async for tp, chunk in data_iter:
+                        assert tp == BlockType.binary
+                        fd.write(chunk)
+                        size += len(chunk)
+                fd.close()
+                logger.info(f"Totally colelcted {b2ssize(size)}B of historic ops from {c.hostname}")
+                return {f"historic::{c.hostname}": True}
+            except Exception as exc:
+                fd.close()
+                c.storage.rm(f"historic.{c.hostname}.bin")
+                logger.error(f"Historic collection failed on {c.hostname}: {exc}")
+                raise
 
 
 @collector(Role.ceph_master)

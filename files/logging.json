@@ -9,7 +9,7 @@
     },
     "handlers": {
         "console": {
-            "level": "INFO",
+            "level": "DEBUG",
             "class": "logging.StreamHandler",
             "formatter": "simple",
             "stream"  : "ext://sys.stdout"
@@ -25,16 +25,23 @@
             "class": "logging.FileHandler",
             "formatter": "simple",
             "filename": "{LOG_FOLDER}/ceph_report_collector.log"
+        },
+        "service_log_file": {
+            "level": "DEBUG",
+            "class": "logging.FileHandler",
+            "formatter": "simple",
+            "filename": "/var/log/ceph_report_service.log"
         }
     },
     "loggers": {
-        "cmd":     {"level": "DEBUG", "handlers": ["FILLED_FROM_COLLECT_INFO_PY"]},
-        "storage": {"level": "DEBUG", "handlers": ["FILLED_FROM_COLLECT_INFO_PY"]},
-        "rpc":     {"level": "DEBUG", "handlers": ["FILLED_FROM_COLLECT_INFO_PY"]},
-        "cephlib": {"level": "DEBUG", "handlers": ["FILLED_FROM_COLLECT_INFO_PY"]},
-        "collect": {"level": "DEBUG", "handlers": ["FILLED_FROM_COLLECT_INFO_PY"]},
-        "agent":   {"level": "DEBUG", "handlers": ["FILLED_FROM_COLLECT_INFO_PY"]},
-        "report":  {"level": "DEBUG", "handlers": ["FILLED_FROM_COLLECT_INFO_PY"]},
-        "index":   {"level": "DEBUG", "handlers": ["FILLED_FROM_COLLECT_INFO_PY"]}
+        "cmd":     {"level": "DEBUG", "handlers": ["console"]},
+        "storage": {"level": "DEBUG", "handlers": ["console"]},
+        "rpc":     {"level": "DEBUG", "handlers": ["console"]},
+        "cephlib": {"level": "DEBUG", "handlers": ["console"]},
+        "collect": {"level": "DEBUG", "handlers": ["console"]},
+        "agent":   {"level": "DEBUG", "handlers": ["console"]},
+        "report":  {"level": "DEBUG", "handlers": ["console"]},
+        "index":   {"level": "DEBUG", "handlers": ["console"]},
+        "service": {"level": "DEBUG", "handlers": ["console", "service_log_file"]}
     }
 }
