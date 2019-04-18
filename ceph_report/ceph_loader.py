@@ -224,21 +224,21 @@ class OSDStoreType(Enum):
 #     osd_perf: Dict[str, numpy.ndarray] = {}
 #
 #     if storage_type == OSDStoreType.filestore:
-#         fstor = [obj["filestore"] for obj in osd_perf_dump]
+#         fstor = [conn["filestore"] for conn in osd_perf_dump]
 #         for field in ("apply_latency", "commitcycle_latency", "journal_latency"):
-#             count = [obj[field]["avgcount"] for obj in fstor]
-#             values = [obj[field]["sum"] for obj in fstor]
+#             count = [conn[field]["avgcount"] for conn in fstor]
+#             values = [conn[field]["sum"] for conn in fstor]
 #             osd_perf[field] = avg_counters(count, values)
 #
-#         arr = numpy.array([obj['journal_wr_bytes']["avgcount"] for obj in fstor], dtype=numpy.float32)
+#         arr = numpy.array([conn['journal_wr_bytes']["avgcount"] for conn in fstor], dtype=numpy.float32)
 #         osd_perf["journal_ops"] = arr[1:] - arr[:-1]  # type: ignore
-#         arr = numpy.array([obj['journal_wr_bytes']["sum"] for obj in fstor], dtype=numpy.float32)
+#         arr = numpy.array([conn['journal_wr_bytes']["sum"] for conn in fstor], dtype=numpy.float32)
 #         osd_perf["journal_bytes"] = arr[1:] - arr[:-1]  # type: ignore
 #     else:
-#         bstor = [obj["bluestore"] for obj in osd_perf_dump]
+#         bstor = [conn["bluestore"] for conn in osd_perf_dump]
 #         for field in ("commit_lat",):
-#             count = [obj[field]["avgcount"] for obj in bstor]
-#             values = [obj[field]["sum"] for obj in bstor]
+#             count = [conn[field]["avgcount"] for conn in bstor]
+#             values = [conn[field]["sum"] for conn in bstor]
 #             osd_perf[field] = avg_counters(count, values)
 #
 #     return osd_perf

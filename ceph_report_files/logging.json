@@ -39,7 +39,7 @@
         "rpc":     {"level": "DEBUG", "handlers": ["console"]},
         "cephlib": {"level": "DEBUG", "handlers": ["console"]},
         "collect": {"level": "DEBUG", "handlers": ["console"]},
-        "agent":   {"level": "DEBUG", "handlers": ["console"]},
+        "aiorpc":  {"level": "DEBUG", "handlers": ["console"]},
         "report":  {"level": "DEBUG", "handlers": ["console"]},
         "index":   {"level": "DEBUG", "handlers": ["console"]},
         "service": {"level": "DEBUG", "handlers": ["console", "service_log_file"]}

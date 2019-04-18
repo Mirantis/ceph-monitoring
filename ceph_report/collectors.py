@@ -11,9 +11,9 @@ import contextlib
 import collections
 from enum import IntEnum
 from dataclasses import dataclass, field
-from typing import Any, List, Dict, Optional, Tuple, TypeVar, Callable, Coroutine
+from typing import Any, List, Dict, Optional, Tuple, TypeVar, Callable, Coroutine, cast
 
-from agent import IAgentRPCNode, ConnectionPool, BlockType
+from aiorpc import IAOIRPCNode, ConnectionPool
 from cephlib import CephRelease, parse_ceph_volumes_js, parse_ceph_disk_js, CephReport
 from koder_utils import (IStorageNNP, CMDResult, parse_devices_tree, collect_process_info, get_host_interfaces,
                          ignore_all, IAsyncNode, b2ssize)
@@ -56,7 +56,7 @@ class Collector:
         return self.__class__(storage, self.hostname, self.opts, self.pool)
 
     @contextlib.asynccontextmanager
-    async def connection(self) -> IAgentRPCNode:
+    async def connection(self) -> IAOIRPCNode:
         assert self.hostname is not None
         async with self.pool.connection(self.hostname) as conn:
             yield conn
@@ -70,12 +70,14 @@ class Collector:
 
     def save(self, path: str, fmt: StorFormat, code: int, data: VT, extra: List[str] = None) -> VT:
         """Save results into storage"""
+        origin_data = data
+
         if code == 0 and fmt == StorFormat.json and self.pretty_json:
             assert isinstance(data, (str, bytes))
             try:
                 dt = json.loads(data)
             except json.JSONDecodeError as exc:
-                logger.error(f"Failed to json decode data for path {path}. Err {exc}. Saving json as is")
+                logger.error(f"Failed to prettify json data for path {path}. Err {exc}. Saving as is")
             else:
                 data = json.dumps(dt, indent=4, sort_keys=True)
 
@@ -92,7 +94,7 @@ class Collector:
         else:
             raise TypeError(f"Can't save value of type {type(data)!r} (to {rpath!r})")
 
-        return data
+        return origin_data
 
     async def run(self, *args, **kwargs) -> CMDResult:
         async with self.connection() as conn:
@@ -141,7 +143,7 @@ class Collector:
         if path is None:
             path = args.replace(" ", "_").replace("-", '_')
 
-        extra_space = "" if cmd.endswith(" ") else " "
+        extra_space = "" if (cmd.endswith(" ") or cmd == "") else " "
         return await self.run_and_save_output(path, cmd + extra_space + args, fmt)
 
 
@@ -243,28 +245,27 @@ async def save_versions(c: CephCollector) -> None:
     await asyncio.wait(coros)
 
 
-@collector(Role.ceph_osd)
-async def collect_historic(c: CephCollector) -> Dict[str, bool]:
-    if c.opts.historic:
-        async with c.connection() as conn:
-            logger.debug(f"Collecting historic ops from {c.hostname}")
-            fd = c.storage.get_fd(f"historic/{c.hostname}.bin", "cb")
-            try:
-                size = 0
-                async with conn.conn.streamed.ceph.get_collected_historic_data(0) as data_iter:
-                    async for tp, chunk in data_iter:
-                        assert tp == BlockType.binary
-                        fd.write(chunk)
-                        size += len(chunk)
-                fd.close()
-                logger.info(f"Totally colelcted {b2ssize(size)}B of historic ops from {c.hostname}")
-                return {f"historic::{c.hostname}": True}
-            except Exception as exc:
-                fd.close()
-                c.storage.rm(f"historic.{c.hostname}.bin")
-                logger.error(f"Historic collection failed on {c.hostname}: {exc}")
-                raise
-
+# @collector(Role.ceph_osd)
+# async def collect_historic(c: CephCollector) -> Dict[str, bool]:
+#     if c.opts.historic:
+#         async with c.connection() as conn:
+#             logger.debug(f"Collecting historic ops from {c.hostname}")
+#             fd = c.storage.get_fd(f"historic/{c.hostname}.bin", "cb")
+#             try:
+#                 size = 0
+#                 async for chunk in cast(IAOIRPCNode, conn).collect_historic():
+#                     size += len(chunk)
+#                     fd.write(chunk)
+#                 logger.info(f"Totally collected {b2ssize(size)}B of historic ops from {c.hostname}")
+#                 return {f"historic::{c.hostname}": True}
+#             except Exception as exc:
+#                 fd.close()
+#                 c.storage.rm(f"historic.{c.hostname}.bin")
+#                 logger.error(f"Historic collection failed on {c.hostname}: {exc}")
+#                 raise
+#             finally:
+#                 fd.close()
+#
 
 @collector(Role.ceph_master)
 async def collect_rbd_volumes_info(c: CephCollector) -> None:
@@ -362,10 +363,11 @@ async def collect_osd(c: CephCollector) -> None:
 
     if cephvollist_js.returncode == 0:
         devs_for_osd: Dict[int, Dict[str, str]] = parse_ceph_volumes_js(cephvollist_js.stdout)
-    elif cephdisklist_js.returncode == 0:
-        devs_for_osd = parse_ceph_disk_js(cephdisklist_js.stdout)
     else:
         devs_for_osd = {}
+
+    if not devs_for_osd and cephdisklist_js.returncode == 0:
+        devs_for_osd = parse_ceph_disk_js(cephdisklist_js.stdout)
 
     logger.debug(f"Found next pids for OSD's on node {c.hostname}: {sorted(running_osds.values())}")
 
@@ -385,10 +387,10 @@ async def collect_osd(c: CephCollector) -> None:
 
 
 async def collect_single_osd(c: CephCollector,
-                       osd_id: int,
-                       pid: Optional[int],
-                       dev_tree: Dict[str, str],
-                       devs: Optional[Dict[str, str]]) -> None:
+                             osd_id: int,
+                             pid: Optional[int],
+                             dev_tree: Dict[str, str],
+                             devs: Optional[Dict[str, str]]) -> None:
 
     await c("log").bash(f"tail -n {c.opts.ceph_log_max_lines} /var/log/ceph/ceph-osd.{osd_id}.log")
     await c("perf_dump").ceph(f"daemon osd.{osd_id} perf dump")
@@ -458,11 +460,11 @@ async def collect_mon_info(c: CephCollector) -> None:
         dt = [chunk async for chunk in conn.tail_file(f"/var/log/ceph/ceph.audit.log", read_size)]
         c.save("ceph_audit", StorFormat.txt, 0, b"".join(dt).decode())
 
-        log_issues = await conn.conn.ceph.find_issues_in_ceph_log(c.opts.ceph_log_max_lines)
+        log_issues = await conn.proxy.ceph.find_issues_in_ceph_log(c.opts.ceph_log_max_lines)
         c.save("ceph_log_wrn_err", StorFormat.txt, 0, log_issues)
 
         with ignore_all:
-            issues_count, regions = await conn.conn.ceph.analyze_ceph_logs_for_issues()
+            issues_count, regions = await conn.proxy.ceph.analyze_ceph_logs_for_issues()
             c.save("log_issues_count", StorFormat.json, 0, json.dumps(issues_count))
             c.save("status_regions", StorFormat.json, 0, json.dumps(regions))
 
@@ -530,8 +532,8 @@ async def collect_bonds_info(c: Collector) -> None:
     async with c.connection() as conn:
         if await conn.exists("/proc/net/bonding"):
             for fname in (await conn.iterdir("/proc/net/bonding")):
-                await c.read_and_save(f"bond_{fname}", f"/proc/net/bonding/{fname}")
-                bondmap[fname] = f"bond_{fname}"
+                await c.read_and_save(f"bond_{fname}", fname)
+                bondmap[str(fname)] = f"bond_{fname}"
 
     c.save("bonds", StorFormat.json, 0, json.dumps(bondmap))
 
@@ -551,7 +553,7 @@ async def collect_packages(c: Collector) -> None:
 @collector(Role.node)
 async def collect_block_devs(c: Collector) -> None:
     async with c.connection() as conn:
-        bdevs_info_rpc = await conn.conn.fs.get_block_devs_info()
+        bdevs_info_rpc = await conn.proxy.fs.get_block_devs_info()
 
         bdevs_info = {name: data for name, data in bdevs_info_rpc.items()}
 
@@ -561,7 +563,7 @@ async def collect_block_devs(c: Collector) -> None:
                     del bdevs_info[name]
 
         tools = ['hdparm', 'smartctl', 'nvme']
-        missing = [name for exists, name in zip((await conn.conn.fs.binarys_exists(tools)), tools) if not exists]
+        missing = [name for exists, name in zip((await conn.proxy.fs.binarys_exists(tools)), tools) if not exists]
 
     if missing:
         logger.warning(f"{','.join(missing)} is not installed on {c.hostname}")

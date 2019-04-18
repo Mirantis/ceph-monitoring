@@ -75,21 +75,21 @@ def get_config(path: Optional[Path]) -> ReporterConfig:
     )
 
 
-FILES_DIRECTORY = Path(__file__).resolve().parent.parent / 'files'
+FILES_DIRECTORY = Path(__file__).resolve().parent.parent / 'ceph_report_files'
 
 
 def get_file(name: str) -> Path:
     return FILES_DIRECTORY / name
 
 
-def setup_logging(log_config_file: Path, log_level: str, out_folder: Optional[str], persistent_log: bool = False):
+def setup_logging(log_config_file: Path, log_level: str, out_folder: Optional[Path], persistent_log: bool = False):
     log_config = json.load(log_config_file.open())
     handlers = ["console"]
 
     if out_folder:
         handlers.append("log_file")
-        log_file = os.path.join(out_folder, "log.txt")
-        log_config["handlers"]["log_file"]["filename"] = log_file
+        log_file = out_folder / "log.txt"
+        log_config["handlers"]["log_file"]["filename"] = str(log_file)
     else:
         del log_config["handlers"]["log_file"]
 

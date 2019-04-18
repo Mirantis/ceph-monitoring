@@ -124,12 +124,3 @@ def re_checker(pattern: str) -> Callable[[str], str]:
         return param
 
     return check
-
-
-def read_inventory(path: Path) -> Iterator[str]:
-    for ln in path.open():
-        ln = ln.strip()
-        if ln and not ln.startswith("#"):
-            assert ':' not in ln
-            assert len(ln.split()) == 1
-            yield ln

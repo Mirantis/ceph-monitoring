@@ -129,7 +129,7 @@ def show_io_status(ceph: CephInfo) -> html.HTMLTable:
     if "recovering_bytes_per_sec" in ceph.status.pgmap_stat:
         t.add_cells("Recovery IO MiBps", b2ssize(ceph.status.pgmap_stat["recovering_bytes_per_sec"]))
     if "recovering_objects_per_sec" in ceph.status.pgmap_stat:
-        t.add_cells("Recovery obj per second", b2ssize_10(ceph.status.pgmap_stat["recovering_objects_per_sec"]))
+        t.add_cells("Recovery conn per second", b2ssize_10(ceph.status.pgmap_stat["recovering_objects_per_sec"]))
     return t
 
 

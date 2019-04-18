@@ -3,7 +3,7 @@ from collections import Counter
 from typing import Iterable, TypeVar, Sequence, Dict, Any, Union, Tuple, List
 
 
-T = TypeVar('T')
+T = TypeVar('ConnTp')
 
 
 def auto_group_by(items: Sequence[T], border: float = 0.3) -> Iterable[Iterable[T]]:

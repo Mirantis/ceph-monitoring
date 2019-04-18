@@ -137,7 +137,7 @@ def to_html_histo(vals: Sequence[Union[int, float]],
             return (msg, p50)
 
 
-T = TypeVar('T')
+T = TypeVar('ConnTp')
 
 
 def partition(items: Iterable[T], size: int) -> Iterable[List[T]]:
