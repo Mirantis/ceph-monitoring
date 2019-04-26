@@ -1,22 +1,22 @@
-import asyncio
 import os
 import re
 import time
 import json
 import array
 import random
+import asyncio
 import logging
 import datetime
 import contextlib
 import collections
 from enum import IntEnum
 from dataclasses import dataclass, field
-from typing import Any, List, Dict, Optional, Tuple, TypeVar, Callable, Coroutine, cast
+from typing import Any, List, Dict, Optional, Tuple, TypeVar, Callable, Coroutine
 
 from aiorpc import IAOIRPCNode, ConnectionPool
 from cephlib import CephRelease, parse_ceph_volumes_js, parse_ceph_disk_js, CephReport
 from koder_utils import (IStorageNNP, CMDResult, parse_devices_tree, collect_process_info, get_host_interfaces,
-                         ignore_all, IAsyncNode, b2ssize)
+                         ignore_all, IAsyncNode)
 
 
 logger = logging.getLogger('collect')
@@ -148,15 +148,15 @@ class Collector:
 
 
 class CollectorProxy:
-    def __init__(self, collector: Collector, path: str = None) -> None:
-        self.collector = collector
+    def __init__(self, collector_obj: Collector, path: str = None) -> None:
+        self.collector_obj = collector_obj
         self.path = path
 
     def __getattr__(self, name: str) -> Callable[[str, Optional[StorFormat]], Coroutine[Any, Any, CMDResult]]:
-        assert name in self.collector.cmds
+        assert name in self.collector_obj.cmds
 
         async def closure(args: str, fmt: Optional[StorFormat] = None) -> CMDResult:
-            return await self.collector.run_cmd_and_save_output(self.path, exe=name, args=args, fmt=fmt)
+            return await self.collector_obj.run_cmd_and_save_output(self.path, exe=name, args=args, fmt=fmt)
 
         return closure
 
@@ -208,11 +208,6 @@ async def collect_base(c: Collector) -> None:
 
 
 @collector(Role.ceph_master)
-async def save_report(c: CephCollector) -> None:
-    c.save("report", StorFormat.json, 0, json.dumps(c.report.raw))
-
-
-@collector(Role.ceph_master)
 async def save_versions(c: CephCollector) -> None:
     pre_luminous = c.report.version.release < CephRelease.luminous
 
@@ -220,6 +215,9 @@ async def save_versions(c: CephCollector) -> None:
     if pre_luminous:
         coros.append(c("osd_versions_old").ceph("tell 'osd.*' version"))
         coros.append(c("mon_versions_old").ceph("tell 'mon.*' version"))
+    else:
+        coros.append(c("versions").ceph("versions"))
+        coros.append(c("mon_metadata").ceph("mon metadata"))
 
     coros.append(c("status").ceph_js("status"))
 
@@ -229,8 +227,8 @@ async def save_versions(c: CephCollector) -> None:
         max_pg = c.opts.max_pg_dump_count
 
     cmds = ["df", "auth list", "mon_status", "osd perf", "osd df", "node ls", "features", "time-sync-status"]
-    if c.report.raw['num_pg'] > max_pg:
-        logger.warning(f"pg dump skipped, as num_pg ({c.report.raw['num_pg']}) > max_pg_dump_count ({max_pg})." +
+    if c.report.num_pg > max_pg:
+        logger.warning(f"pg dump skipped, as num_pg ({c.report.num_pg}) > max_pg_dump_count ({max_pg})." +
                        " Use --max-pg-dump-count NUM option to change the limit")
     else:
         cmds.append("pg dump")
@@ -245,42 +243,20 @@ async def save_versions(c: CephCollector) -> None:
     await asyncio.wait(coros)
 
 
-# @collector(Role.ceph_osd)
-# async def collect_historic(c: CephCollector) -> Dict[str, bool]:
-#     if c.opts.historic:
-#         async with c.connection() as conn:
-#             logger.debug(f"Collecting historic ops from {c.hostname}")
-#             fd = c.storage.get_fd(f"historic/{c.hostname}.bin", "cb")
-#             try:
-#                 size = 0
-#                 async for chunk in cast(IAOIRPCNode, conn).collect_historic():
-#                     size += len(chunk)
-#                     fd.write(chunk)
-#                 logger.info(f"Totally collected {b2ssize(size)}B of historic ops from {c.hostname}")
-#                 return {f"historic::{c.hostname}": True}
-#             except Exception as exc:
-#                 fd.close()
-#                 c.storage.rm(f"historic.{c.hostname}.bin")
-#                 logger.error(f"Historic collection failed on {c.hostname}: {exc}")
-#                 raise
-#             finally:
-#                 fd.close()
-#
-
 @collector(Role.ceph_master)
 async def collect_rbd_volumes_info(c: CephCollector) -> None:
     if c.opts.no_rbd_info:
         logger.debug("Collecting RBD volumes stats")
         rbd_cmd, _ = c.cmds['rbd']
         sep = '-' * 60
-        for pool in c.report.raw["osdmap"]["pools"]:
+        for pool in c.report.osdmap.pools:
             if 'application_metadata' in pool:
-                if 'rbd' not in pool.get('application_metadata'):
+                if 'rbd' not in pool.application_metadata:
                     continue
-            elif 'rgw' in pool['pool_name']:
+            elif 'rgw' in pool.pool_name:
                 continue
 
-            name = pool['pool_name']
+            name = pool.pool_name
             await c(f'rbd_du_{name}').rbd(f"du -p {name}")
 
             cmd = f'for image in $(rbd list -p rbd) ; do echo "{sep}" ; " + \
@@ -347,7 +323,7 @@ async def collect_osd(c: CephCollector) -> None:
             osd_id = int(rr.group('osd_id'))
             running_osds[osd_id] = int(rr.group('pid'))
 
-    ids_from_ceph = [meta["id"] for meta in c.report.raw["osd_metadata"] if meta["hostname"] == c.hostname]
+    ids_from_ceph = [meta.id for meta in c.report.osd_metadata if meta.hostname == c.hostname]
     unexpected_osds = set(running_osds).difference(ids_from_ceph)
 
     for osd_id in unexpected_osds:

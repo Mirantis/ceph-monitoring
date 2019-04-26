@@ -1,241 +1,74 @@
 import re
 import json
 import logging
-import weakref
 import datetime
+from dataclasses import dataclass, field
 from ipaddress import IPv4Network, IPv4Address
-from typing import Iterable, Iterator, Dict, Any, List, Union, Tuple, Optional
+from typing import Dict, Any, List, Tuple, Optional, Iterable
 
 import numpy
-import dataclasses
 
-from koder_utils import ssize2b
-from koder_utils.storage import AttredStorage, TypedStorage
+from koder_utils import (AttredStorage, TypedStorage, parse_lshw_info, Host, parse_netdev, parse_ipa, NetStats, Disk,
+                         LogicBlockDev, is_routable, NetworkBond, NetworkAdapter, NetAdapterAddr, BlockUsage,
+                         AggNetStat, ClusterNetData, parse_df, parse_diskstats, parse_lsblkjs)
 
-from .hw_info import parse_hw_info
-from .cluster_classes import (IPANetDevInfo, NetStats, Disk, DiskType, HWModel, LogicBlockDev, BlockDevType, DevPath,
-                              NetworkBond, NetworkAdapter, NetAdapterAddr, Host, Cluster, CephInfo, BlockUsage,
-                              OSDPGStats, AggNetStat, PoolDF)
+from cephlib import OSDPGStats, PoolDF, CephInfo
+from koder_utils.linux import parse_meminfo
+
 from .ceph_loader import CephLoader
 
-logger = logging.getLogger("cephlib.parse")
-
-netstat_fields = "recv_bytes recv_packets rerrs rdrop rfifo rframe rcompressed" + \
-                 " rmulticast send_bytes send_packets serrs sdrop sfifo scolls" + \
-                 " scarrier scompressed"
+logger = logging.getLogger("ceph_report")
 
 
-# -----  parse functions -----------------------------------------------------------------------------------------------
 
+@dataclass
+class Cluster:
+    hosts: Dict[str, Host]
+    ip2host: Dict[str, Host]
+    report_collected_at_local: str
+    report_collected_at_gmt: str
+    report_collected_at_gmt_s: float
+    has_second_report: bool = False
+    dtime: Optional[float] = field(default=None, init=False)  # type: ignore
+    _net_data_cache: Optional[Dict[str, ClusterNetData]] = field(default=None, init=False)  # type: ignore
 
-def parse_ipa(data: str) -> Dict[str, IPANetDevInfo]:
-    """
-    parse 'ip a' output
-    """
-    res = {}
-    for line in data.split("\n"):
-        if line.strip() != '' and not line[0].isspace():
-            rr = re.match(r"\d+:\s+(?P<name>[^:]*):.*?mtu\s+(?P<mtu>\d+)", line)
-            if rr:
-                name = rr.group('name')
-                res[name] = IPANetDevInfo(name, int(rr.group('mtu')))
-    return res
+    @property
+    def sorted_hosts(self) -> Iterable[Host]:
+        return [host for _, host in sorted(self.hosts.items())]
 
+    @property
+    def net_data(self) -> Dict[str, ClusterNetData]:
+        if self._net_data_cache is None:
+            self._net_data_cache = {}
+            for host in self.hosts.values():
+                for addr, hw_adapters in host.iter_net_addrs():
+                    if addr.is_routable:
+                        net_id = str(addr.net)
 
-def parse_netdev(netdev: str) -> Dict[str, NetStats]:
-    info: Dict[str, NetStats] = {}
-    for line in netdev.strip().split("\n")[2:]:
-        adapter, data = line.split(":")
-        adapter = adapter.strip()
-        assert adapter not in info
-        info[adapter] = NetStats(**dict(zip(netstat_fields.split(), map(int, data.split()))))
-    return info
+                        if net_id not in self._net_data_cache:
+                            nd = ClusterNetData(net_id, NetStats.empty())
+                        else:
+                            nd = self._net_data_cache[net_id]
 
+                        for adapter in hw_adapters:
 
-def parse_meminfo(meminfo: str) -> Dict[str, int]:
-    info = {}
-    for line in meminfo.split("\n"):
-        line = line.strip()
-        if line == '':
-            continue
-        name, data = line.split(":", 1)
-        data = data.strip()
-        if " " in data:
-            data = data.replace(" ", "")
-            assert data[-1] == 'B'
-            val = ssize2b(data[:-1])
-        else:
-            val = int(data)
-        info[name] = val
-    return info
+                            if adapter.mtu:
+                                nd.mtus.add(adapter.mtu)
 
+                            if adapter.speed:
+                                nd.speeds.add(adapter.speed)
 
-def is_routable(ip: IPv4Address, net: IPv4Network) -> bool:
-    return not (ip.is_loopback or net.prefixlen == 32)
+                            nd.usage += adapter.usage
+                            if adapter.d_usage:
+                                if not nd.d_usage:
+                                    nd.d_usage = NetStats.empty()
 
+                                nd.d_usage += adapter.d_usage
 
-def parse_diskstats(data: str) -> Dict[str, BlockUsage]:
-    #  1 - major number
-    #  2 - minor mumber
-    #  3 - device name
-    #  4 - reads completed successfully
-    #  5 - reads merged
-    #  6 - sectors read
-    #  7 - time spent reading (ms)
-    #  8 - writes completed
-    #  9 - writes merged
-    # 10 - sectors written
-    # 11 - time spent writing (ms)
-    # 12 - I/Os currently in progress
-    # 13 - time spent doing I/Os (ms)
-    # 14 - weighted time spent doing I/Os (ms)
+                        if net_id not in self._net_data_cache:
+                            self._net_data_cache[net_id] = nd
 
-    SECTOR_SIZE = 512
-    reads_completed = 3
-    sectors_read = 5
-    rtime = 6
-    writes_completed = 7
-    sectors_written = 9
-    wtime = 10
-    io_queue = 11
-    io_time = 12
-    weighted_io_time = 13
-
-    res = {}
-
-    for line in data.split("\n"):
-        line = line.strip()
-        if line:
-            vals = line.split()
-            name = vals[2]
-
-            read_bytes = int(vals[sectors_read]) * SECTOR_SIZE
-            write_bytes = int(vals[sectors_written]) * SECTOR_SIZE
-            read_iops = int(vals[reads_completed])
-            write_iops = int(vals[writes_completed])
-            io_time_v = int(vals[io_time])
-            w_io_time = int(vals[weighted_io_time])
-            iops = read_iops + write_iops
-            qd = w_io_time / io_time if io_time > 1000 else None
-            lat = w_io_time / iops if iops > 100 else None
-
-            res[name] = BlockUsage(read_bytes=read_bytes,
-                                   write_bytes=write_bytes,
-                                   total_bytes=read_bytes + write_bytes,
-                                   read_iops=read_iops,
-                                   write_iops=write_iops,
-                                   iops=iops,
-                                   io_time=io_time_v,
-                                   w_io_time=w_io_time,
-                                   lat=lat,
-                                   queue_depth=qd)
-
-    return res
-
-
-def parse_lsblkjs(data: List[Dict[str, Any]],
-                  hostname: str,
-                  diskstats: Dict[str, BlockUsage]) -> Iterable[Disk]:
-    for disk_js in data:
-        name = disk_js['name']
-
-        if re.match(r"sr\d+|loop\d+", name):
-            continue
-
-        if disk_js['type'] != 'disk':
-            logger.warning("lsblk for node %r return device %r, which is %r not 'disk'. Ignoring it",
-                           hostname, name, disk_js['type'])
-            continue
-
-        tp = disk_js["tran"]
-        if tp is None:
-            if disk_js['subsystems'] == 'block:scsi:pci':
-                tp = 'sas'
-            elif disk_js['subsystems'] == 'block:nvme:pci':
-                tp = 'nvme'
-            elif disk_js['subsystems'] == 'block:virtio:pci':
-                tp = 'virtio'
-
-        # raid controllers often don't report ssd drives correctly
-        # only SSD has 4k phy sec size
-        phy_sec = int(disk_js["phy-sec"])
-        if phy_sec == 4096:
-            disk_js["rota"] = '0'
-
-        stor_tp = {
-            ('sata', '1'): DiskType.sata_hdd,
-            ('sata', '0'): DiskType.sata_ssd,
-            ('nvme', '0'): DiskType.nvme,
-            ('nvme', '1'): DiskType.unknown,
-            ('sas',  '1'): DiskType.sas_hdd,
-            ('sas',  '0'): DiskType.sas_ssd,
-            ('virtio', '0'): DiskType.virtio,
-            ('virtio', '1'): DiskType.virtio,
-        }.get((tp, disk_js["rota"]))
-
-        if stor_tp is None:
-            logger.warning("Can't detect disk type for %r in node %r. tran=%r, rota=%r, subsystem=%r." +
-                           " Treating it as " + DiskType.sata_hdd.name,
-                           name, hostname, disk_js['tran'], disk_js['rota'], disk_js['subsystems'])
-            stor_tp = DiskType.sata_hdd
-
-        lbd = LogicBlockDev(name=name,
-                            dev_path=DevPath('/dev/' + name),
-                            size=int(disk_js['size']),
-                            mountpoint=disk_js['mountpoint'],
-                            fs=disk_js["fstype"],
-                            tp=BlockDevType.hwdisk,
-                            hostname=hostname,
-                            usage=diskstats[name])
-
-        dsk = Disk(logic_dev=lbd,
-                   rota=disk_js['rota'] == '1',
-                   scheduler=disk_js['sched'],
-                   extra=disk_js,
-                   hw_model=HWModel(vendor=disk_js['vendor'], model=disk_js['model'], serial=disk_js['serial']),
-                   rq_size=int(disk_js["rq-size"]),
-                   phy_sec=phy_sec,
-                   min_io=int(disk_js["min-io"]),
-                   tp=stor_tp)
-
-        def fill_mountable(root: Dict[str, Any], parent: Union[Disk, LogicBlockDev]):
-            if 'children' in root:
-                for ch_js in root['children']:
-                    assert '/' not in ch_js['name']
-                    part = LogicBlockDev(name=ch_js['name'],
-                                         tp=BlockDevType.unknown,
-                                         dev_path=DevPath('/dev/' + ch_js['name']),
-                                         size=int(ch_js['size']),
-                                         mountpoint=ch_js['mountpoint'],
-                                         fs=ch_js["fstype"],
-                                         parent=weakref.ref(dsk),
-                                         label=ch_js.get("partlabel"),
-                                         hostname=hostname,
-                                         usage=diskstats[name])
-                    parent.children[part.name] = part
-                    fill_mountable(ch_js, part)
-
-        fill_mountable(disk_js, dsk)
-
-        yield dsk
-
-
-@dataclasses.dataclass
-class DFInfo:
-    path: DevPath
-    name: str
-    size: int
-    free: int
-    mountpoint: str
-
-
-def parse_df(data: str) -> Iterator[DFInfo]:
-    lines = data.strip().split("\n")
-    assert lines[0].split() == ["Filesystem", "1K-blocks", "Used", "Available", "Use%", "Mounted", "on"]
-    for ln in lines[1:]:
-        name, size, _, free, _, mountpoint = ln.split()
-        yield DFInfo(path=DevPath(name), name=name.split("/")[-1], size=int(size),
-                     free=int(free), mountpoint=mountpoint)
+        return self._net_data_cache
 
 
 # --- load functions ---------------------------------------------------------------------------------------------------
@@ -365,11 +198,11 @@ def load_perf_monitoring(storage: TypedStorage) -> Tuple[Optional[Dict[int, List
         if is_file:
             logger.warning("Unexpected file %r in perf_monitoring folder", host_id)
 
-        for is_file, fname in storage.txt.perf_monitoring[host_id]:
-            if is_file and fname == 'collected_at.csv':
+        for is_file2, fname in storage.txt.perf_monitoring[host_id]:
+            if is_file2 and fname == 'collected_at.csv':
                 continue
 
-            if is_file and fname.count('.') == 3:
+            if is_file2 and fname.count('.') == 3:
                 sensor, dev_or_osdid, metric, ext = fname.split(".")
                 if ext == 'json' and sensor == 'ceph' and metric == 'perf_dump':
                     osd_id = osd_rr.match(dev_or_osdid)
@@ -387,7 +220,7 @@ def load_perf_monitoring(storage: TypedStorage) -> Tuple[Optional[Dict[int, List
                     continue
 
             logger.warning("Unexpected %s %r in %r host performance_data folder",
-                           'file' if is_file else 'folder', fname, host_id)
+                           'file' if is_file2 else 'folder', fname, host_id)
 
     return osd_perf_dump, osd_historic_ops_paths
 
@@ -428,7 +261,7 @@ class Loader:
             hw_info = None
             if lshw_xml is not None:
                 try:
-                    hw_info = parse_hw_info(lshw_xml)
+                    hw_info = parse_lshw_info(lshw_xml)
                 except Exception as exc:
                     logger.warning(f"Failed to parse lshw info: {exc}")
 
@@ -473,14 +306,15 @@ class Loader:
 
 
 def load_all(storage: TypedStorage) -> Tuple[Cluster, CephInfo]:
-    l = Loader(storage)
+    loader = Loader(storage)
     logger.debug("Loading perf data")
-    l.load_perf_monitoring()
+    loader.load_perf_monitoring()
     logger.debug("Loading hosts")
-    l.load_hosts()
+    loader.load_hosts()
     logger.debug("Loading cluster")
-    cluster = l.load_cluster()
-    ceph_l = CephLoader(storage, l.ip2host, l.hosts, l.osd_perf_counters_dump, l.osd_historic_ops_paths)
+    cluster = loader.load_cluster()
+    ceph_l = CephLoader(storage, loader.ip2host, loader.hosts, loader.osd_perf_counters_dump,
+                        loader.osd_historic_ops_paths)
     logger.debug("Loading ceph")
     return cluster, ceph_l.load_ceph()
 

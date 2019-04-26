@@ -1,5 +1,3 @@
-import collections
-import hashlib
 import os
 import sys
 import time
@@ -8,10 +6,12 @@ import shutil
 import struct
 import asyncio
 import os.path
+import hashlib
 import argparse
 import datetime
 import tempfile
 import subprocess
+import collections
 import logging.config
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -97,6 +97,7 @@ class RemoteNodesCfg:
     conn_pool: ConnectionPool
     failed_hosts: List[str]
     ceph_report: CephReport
+    raw_report: Any
     osd_nodes: Dict[str, List[int]]
     opts: Any
     ceph_extra_args: List[str]
@@ -244,8 +245,10 @@ async def raise_with_node(coro: Coroutine[Any, Any, T], hostname: str) -> T:
         raise ExceptionWithNode(local_exc, hostname) from local_exc
 
 
-async def get_report(ceph_master: str, pool: ConnectionPool, timeout: float, ceph_extra_args: List[str]) -> CephReport:
-    async def _get_report(node_conn: IAsyncNode) -> CephReport:
+async def get_report(ceph_master: str, pool: ConnectionPool, timeout: float, ceph_extra_args: List[str]) \
+        -> Tuple[CephReport, Any]:
+
+    async def _get_report(node_conn: IAsyncNode) -> Tuple[CephReport, Any]:
         await check_master(node_conn)
         version = await get_ceph_version(node_conn, ceph_extra_args)
         return await CephCLI(node_conn, ceph_extra_args, timeout, version.release).discover_report()
@@ -278,11 +281,11 @@ async def do_preconfig(opts: Any) -> RemoteNodesCfg:
     inv = get_inventory(opts, node_list)
 
     async with conn_pool:
-        ceph_report = await get_report(inv.ceph_master, conn_pool, aiorpc_cfg.cmd_timeout, opts.ceph_extra_args)
-        for mon in ceph_report.mons:
+        ceph_report, raw = await get_report(inv.ceph_master, conn_pool, aiorpc_cfg.cmd_timeout, opts.ceph_extra_args)
+        for mon in ceph_report.monmap.mons:
             if mon.name in inv:
                 inv.add_node(mon.name, CephRole.mon)
-        for osd in ceph_report.osds:
+        for osd in ceph_report.osd_metadata:
             if osd.hostname in inv:
                 inv.add_node(osd.hostname, CephRole.osd)
 
@@ -297,14 +300,15 @@ async def do_preconfig(opts: Any) -> RemoteNodesCfg:
 
     osd_nodes = collections.defaultdict(list)
 
-    for osd_meta in ceph_report.osds:
+    for osd_meta in ceph_report.osd_metadata:
         if osd_meta.hostname in inv:
-            osd_nodes[osd_meta.hostname].append(osd_meta.osd_id)
+            osd_nodes[osd_meta.hostname].append(osd_meta.id)
 
     return RemoteNodesCfg(inventory=inv,
                           conn_pool=conn_pool,
                           failed_hosts=failed_hosts,
                           ceph_report=ceph_report,
+                          raw_report=raw,
                           osd_nodes=osd_nodes,
                           opts=opts,
                           ceph_extra_args=opts.ceph_extra_args,
@@ -346,6 +350,10 @@ async def run_collection(opts: Any,
                 })
 
         storage.put_raw(json.dumps(nodes_info).encode(), "hosts.json")
+        storage.put_raw(json.dumps(cfg.raw_report).encode(), "master/report.json")
+
+        # release memory, report can be quite a large
+        cfg.raw_report = None
 
         collectors_coro = get_collectors(storage=storage,
                                          opts=opts,

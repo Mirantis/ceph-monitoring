@@ -1,12 +1,8 @@
-import json
-import os
 import re
 import argparse
 import datetime
-import logging.config
 from enum import Enum
-from pathlib import Path
-from typing import NamedTuple, Dict, Tuple, Callable, Iterator, Optional
+from typing import NamedTuple, Dict, Tuple, Callable, Optional
 
 
 CLUSTER_NAME_RE = "[0-9a-zA-Z_-]+$"

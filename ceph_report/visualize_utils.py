@@ -11,37 +11,6 @@ class StopError(Exception):
     pass
 
 
-def seconds_to_str(seconds: Union[int, float]) -> str:
-    seconds = int(seconds)
-
-    s = seconds % 60
-    m = (seconds // 60) % 60
-    h = (seconds // 3600) % 24
-    d = seconds // (3600 * 24)
-
-    if s != 0 and h != 0:
-        if d == 0:
-            return f"{h}:{m:<02d}:{s:<02d}"
-        return f"{d} days {h}:{m:<02d}:{s:<02d}"
-
-    data = []
-    if d != 0:
-        data.append(f"{d} days")
-    if h != 0:
-        data.append(f"{h}h")
-    if m != 0:
-        data.append(f"{m}m")
-    if s != 0:
-        data.append(f"{s}s")
-
-    return " ".join(data)
-
-
-def seconds_to_str_simple(seconds: Union[int, float]) -> str:
-    seconds = int(seconds)
-    return f"{seconds // 3600}:{(seconds // 60) % 60:<02d}:{seconds % 60:<02d}"
-
-
 def get_all_versions(services: Iterable[Union[CephOSD, CephMonitor]]) -> Dict[CephVersion, int]:
     all_version: Dict[CephVersion, int] = collections.Counter()
     for srv in services:
@@ -137,7 +106,7 @@ def to_html_histo(vals: Sequence[Union[int, float]],
             return (msg, p50)
 
 
-T = TypeVar('ConnTp')
+T = TypeVar('T')
 
 
 def partition(items: Iterable[T], size: int) -> Iterable[List[T]]:
