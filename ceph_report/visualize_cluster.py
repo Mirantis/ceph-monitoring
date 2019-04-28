@@ -7,29 +7,28 @@ from typing import Callable, Dict, List, Optional
 
 import yaml
 
-from cephlib.units import b2ssize_10, b2ssize
+from koder_utils import (b2ssize_10, b2ssize, Table, Column, seconds_to_str, table_to_html, XMLDocument, fail, ok,
+                         doc_to_string, SimpleTable)
+from cephlib import CephInfo, FileStoreInfo, BlueStoreInfo, MonRole, Pool
 
-from . import table
-from . import html
-from .cluster_classes import CephInfo, Cluster, FileStoreInfo, BlueStoreInfo, MonRole, Pool
-from .visualize_utils import tab, seconds_to_str, get_all_versions, partition_by_len, table_id
+from .cluster import Cluster
+from .visualize_utils import tab, partition_by_len, table_id, table_to_doc
 from .checks import run_all_checks, CheckMessage
 from .report import Report
 from .obj_links import err_link, mon_link, pool_link
-from .table import Table, count, bytes_sz, ident, idents_list, exact_count, to_str
 
 
-logger = logging.getLogger("cephlib.checks")
+logger = logging.getLogger("ceph_report")
 
 
 @tab("Status")
-def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
+def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> XMLDocument:
     """
     Cluster short summary
     """
-    class SummaryTable(table.Table):
-        setting = table.ident()
-        value = table.to_str()
+    class SummaryTable(Table):
+        setting = Column.s()
+        value = Column.s()
 
     t = SummaryTable()
     t.add_row("Collected at", cluster.report_collected_at_local)
@@ -46,10 +45,10 @@ def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
     t.add_row("Monitors count", len(ceph.mons))
     t.add_row("OSD's count", len(ceph.osds))
 
-    mon_vers = get_all_versions(ceph.mons.values())
+    mon_vers = [mon.version for mon in ceph.mons.values()]
     t.add_row("Monitor versions", ", ".join(map(str, sorted(mon_vers))))
 
-    osd_vers = get_all_versions(ceph.osds.values())
+    osd_vers = [osd.version for osd in ceph.osds.values()]
     vers = [str(ver) for ver in sorted(ver for ver in osd_vers if ver)]
     if None in osd_vers:
         vers.append("Unknown")
@@ -70,7 +69,7 @@ def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
     mon_tm = time.mktime(time.strptime(ceph.status.monmap_stat['modified'], "%Y-%m-%d %H:%M:%S.%f"))
     collect_tm = time.mktime(time.strptime(cluster.report_collected_at_local, "%Y-%m-%d %H:%M:%S"))
     t.add_row("Monmap modified in", seconds_to_str(int(collect_tm - mon_tm)))
-    return t.html(id="table-summary", sortable=False)
+    return table_to_doc(t, id="table-summary", sortable=False)
 
 
 def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report):
@@ -80,23 +79,25 @@ def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report):
     config = yaml.load((Path(__file__).parent / 'files' / 'check_conf.yaml').open())
     check_results = run_all_checks(config, cluster, ceph)
 
-    t = html.HTMLTable("table-issues", ["Check", "Result", "Comment"], sortable=False)
+    t = SimpleTable("Check", "Result", "Comment")
 
-    failed = html.fail("Failed")
-    passed = html.ok("Passed")
+    failed = fail("Failed")
+    passed = ok("Passed")
 
     err_per_test: Dict[str, List[CheckMessage]] = collections.defaultdict(list)
 
     for result in check_results:
-        t.add_cells(result.check_description, passed if result.passed else failed,
+        t.add_cells(result.check_description, doc_to_string(passed if result.passed else failed),
                     err_link(result.reporter_id, result.message).link)
         for err in result.fails:
             err_per_test[err.reporter_id].append(err)
 
-    report.add_block('issues', "Issues:", str(t))
+    tbl = table_to_html(t)
+    tbl(id="table-issues", sortable='false')
+    report.add_block('issues', "Issues:", tbl)
 
     for reporter_id, errs in err_per_test.items():
-        table = html.HTMLTable(headers=["Services", "Serv.<br>count", "Error"])
+        table = SimpleTable("Services", "Serv.<br>count", "Error")
 
         # group errors by services
         err_map: Dict[str, List[str]] = {}
@@ -117,33 +118,38 @@ def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report):
 
 
 @tab("Current IO Activity")
-def show_io_status(ceph: CephInfo) -> html.HTMLTable:
+def show_io_status(ceph: CephInfo) -> XMLDocument:
     """
     Current cluster IO load
     """
-    t = html.HTMLTable("table-io-summary", ["IO type", "Value"], sortable=False)
-    t.add_cells("Client IO Write MiBps", b2ssize(ceph.status.write_bytes_sec // 2 ** 20))
-    t.add_cells("Client IO Write OPS", b2ssize(ceph.status.write_op_per_sec))
-    t.add_cells("Client IO Read MiBps", b2ssize(ceph.status.read_bytes_sec // 2 ** 20))
-    t.add_cells("Client IO Read OPS", b2ssize(ceph.status.read_op_per_sec))
+    class IOTable(Table):
+        io_type = Column.s("IO type")
+        val = Column.ei()
+
+    t = IOTable()
+    t.add_row("Client IO Write MiBps", b2ssize(ceph.status.write_bytes_sec // 2 ** 20))
+    t.add_row("Client IO Write OPS", b2ssize(ceph.status.write_op_per_sec))
+    t.add_row("Client IO Read MiBps", b2ssize(ceph.status.read_bytes_sec // 2 ** 20))
+    t.add_row("Client IO Read OPS", b2ssize(ceph.status.read_op_per_sec))
     if "recovering_bytes_per_sec" in ceph.status.pgmap_stat:
-        t.add_cells("Recovery IO MiBps", b2ssize(ceph.status.pgmap_stat["recovering_bytes_per_sec"]))
+        t.add_row("Recovery IO MiBps", b2ssize(ceph.status.pgmap_stat["recovering_bytes_per_sec"]))
     if "recovering_objects_per_sec" in ceph.status.pgmap_stat:
-        t.add_cells("Recovery conn per second", b2ssize_10(ceph.status.pgmap_stat["recovering_objects_per_sec"]))
-    return t
+        t.add_row("Recovery conn per second", b2ssize_10(ceph.status.pgmap_stat["recovering_objects_per_sec"]))
+
+    return table_to_doc(t, id="table-io-summary", sortable=False)
 
 
 class MonitorInfoTable(Table):
-   name = ident(help="Monitor/host name")
-   health = ident(help="Monitor health")
-   role = ident(help="Monitor role")
-   free = ident("Disk free,<br>B (%)", help="Free space on used disk")
-   db_size = bytes_sz("DB size", help="Monitor database size")
+    name = Column.s(help="Monitor/host name")
+    health = Column.s(help="Monitor health")
+    role = Column.s(help="Monitor role")
+    free = Column.s("Disk free<br>B (%)", help="Free space on used disk")
+    db_size = Column.i("DB size", help="Monitor database size")
 
 
 @tab("Monitors info")
 @table_id("table-mon-info")
-def show_mons_info(ceph: CephInfo) -> Table:
+def show_mons_info(ceph: CephInfo) -> XMLDocument:
     """
     Monitors info
     {MonitorInfoTable.help()}
@@ -153,18 +159,18 @@ def show_mons_info(ceph: CephInfo) -> Table:
 
     for _, mon in sorted(ceph.mons.items()):
         role = "Unknown"
-        health = html.fail("HEALTH_FAIL")
+        health = fail("HEALTH_FAIL")
         if mon.status is None:
             for mon_info in ceph.status.monmap_stat['mons']:
                 if mon_info['name'] == mon.name:
                     if mon_info.get('rank') in [0, 1, 2, 3, 4]:
-                        health = html.ok("HEALTH_OK")
+                        health = ok("HEALTH_OK")
                         role = "leader" if mon_info.get('rank') == 0 else "follower"
                         break
         else:
-            health = html.ok("HEALTH_OK") if mon.status == "HEALTH_OK" else html.fail(mon.status)
+            health = ok("HEALTH_OK") if mon.status == "HEALTH_OK" else fail(mon.status)
             role = "leader" if mon.role == MonRole.master else \
-                ("follower"  if mon.role == MonRole.master else "Unknown")
+                ("follower" if mon.role == MonRole.master else "Unknown")
 
         if mon.kb_avail is None:
             perc = "Unknown"
@@ -180,17 +186,17 @@ def show_mons_info(ceph: CephInfo) -> Table:
         row.free = perc, sort_by
         row.db_size = mon.database_size
 
-    return table
+    return table_to_doc(table, id="table-mon-info")
 
 
 @tab("Settings")
-def show_primary_settings(ceph: CephInfo) -> html.HTMLTable:
+def show_primary_settings(ceph: CephInfo) -> XMLDocument:
     """
     Most important cluster settings
     """
-    table = html.HTMLTable("table-settings", ["Name", "Value"])
+    table = SimpleTable("Name", "Value")
 
-    table.add_cell("<b>Common</b>", colspan="2")
+    table.add_cell("<b>Common</b>", colspan=2)
     table.next_row()
 
     table.add_cells("Cluster net", str(ceph.cluster_net))
@@ -216,7 +222,7 @@ def show_primary_settings(ceph: CephInfo) -> html.HTMLTable:
                 vl = tr_func(vl)
             table.add_cells(name.capitalize(), vl)
 
-    table.add_cell("<b>Fail detection</b>", colspan="2")
+    table.add_cell("<b>Fail detection</b>", colspan=2)
     table.next_row()
 
     show_opt("mon osd down out interval", lambda x: seconds_to_str(int(x)))
@@ -227,13 +233,13 @@ def show_primary_settings(ceph: CephInfo) -> html.HTMLTable:
     show_opt("mon osd reporter subtree level")
     show_opt("osd heartbeat grace", lambda x: seconds_to_str(int(x)))
 
-    table.add_cell("<b>Other</b>", colspan="2")
+    table.add_cell("<b>Other</b>", colspan=2)
     table.next_row()
 
     show_opt("osd max object size", lambda x: b2ssize(int(x)) + "B")
     show_opt("osd mount options xfs")
 
-    table.add_cell("<b>Scrub</b>", colspan="2")
+    table.add_cell("<b>Scrub</b>", colspan=2)
     table.next_row()
 
     show_opt("osd max scrubs")
@@ -247,7 +253,7 @@ def show_primary_settings(ceph: CephInfo) -> html.HTMLTable:
     show_opt("osd deep scrub interval", lambda x: seconds_to_str(int(float(x))))
     show_opt("osd deep scrub stride", lambda x: b2ssize(int(x)) + "B")
 
-    table.add_cell("<b>OSD io</b>", colspan="2")
+    table.add_cell("<b>OSD io</b>", colspan=2)
     table.next_row()
 
     show_opt("osd op queue")
@@ -271,7 +277,7 @@ def show_primary_settings(ceph: CephInfo) -> html.HTMLTable:
     show_opt("osd recovery thread timeout")
 
     if ceph.has_bs:
-        table.add_cell("<b>Bluestore</b>", colspan="2")
+        table.add_cell("<b>Bluestore</b>", colspan=2)
         table.next_row()
 
         show_opt("bluestore cache size hdd", lambda x: b2ssize(int(x)) + "B")
@@ -282,39 +288,38 @@ def show_primary_settings(ceph: CephInfo) -> html.HTMLTable:
         show_opt("bluestore csum type")
 
     if ceph.has_fs:
-        table.add_cell("<b>Filestore</b>", colspan="2")
+        table.add_cell("<b>Filestore</b>", colspan=2)
         table.next_row()
         table.add_cells("Journal aio", ceph.settings.journal_aio)
         table.add_cells("Journal dio", ceph.settings.journal_dio)
         table.add_cells("Filestorage sync", str(int(float(ceph.settings.filestore_max_sync_interval))) + 's')
 
-    return table
+    return table_to_doc(table, id="table-settings")
 
 
 class RulesetsTable(Table):
-    rule = ident(help="Rule name")
-    id = exact_count(help="Rule id")
-    pools = idents_list(help="Pools, this rule is used for")
-    osd_class = ident(help='OSD class used int his rule')
-    replication_level = ident("Replication<br>level", help='Level on which this rule doing replication')
-    pg = ident("PG", help='Total PG count, managed by this rule')
-    pg_per_osd = exact_count("PG copy/OSD", help='Average PG copy per OSD for this rule')
-    num_osd = exact_count("# OSD", help="OSD count, this rule put data to")
-    total_size = bytes_sz(help="Total space osd all OSD's used by this rule")
-    free_size = to_str(help="Free space on OSD's, managed by this rule (not counting replication)")
-    data = ident("Data size<br>TiB", help="User data size, managed by this rule (without replication)")
-    objs = ident("Total<br>Kobjects", help="Object count managed by this rule")
-    data_disk_sizes = ident(help="Disk sizes, used to store data for this rule on OSD's")
-    disk_types = idents_list(delim='<br>', help="Disk types, used to store data for this rule on OSD's")
-    data_disk_models = idents_list(help="Disk models, used to store data for this rule on OSD's")
+    rule = Column.s(help="Rule name")
+    id = Column.ei(help="Rule id")
+    pools = Column.list(help="Pools, this rule is used for")
+    osd_class = Column.s(help='OSD class used int his rule')
+    replication_level = Column.s("Replication<br>level", help='Level on which this rule doing replication')
+    pg = Column.s("PG", help='Total PG count, managed by this rule')
+    pg_per_osd = Column.ei("PG copy/OSD", help='Average PG copy per OSD for this rule')
+    num_osd = Column.ei("# OSD", help="OSD count, this rule put data to")
+    total_size = Column.sz(help="Total space osd all OSD's used by this rule")
+    free_size = Column.s(help="Free space on OSD's, managed by this rule (not counting replication)")
+    data = Column.s("Data size<br>TiB", help="User data size, managed by this rule (without replication)")
+    objs = Column.s("Total<br>Kobjects", help="Object count managed by this rule")
+    data_disk_sizes = Column.s(help="Disk sizes, used to store data for this rule on OSD's")
+    disk_types = Column.list(delim='<br>', help="Disk types, used to store data for this rule on OSD's")
+    data_disk_models = Column.list(help="Disk models, used to store data for this rule on OSD's")
 
 
 @table_id("table-rules")
 @tab("Crush rulesets")
-def show_ruleset_info(ceph: CephInfo) -> Table:
+def show_ruleset_info(ceph: CephInfo) -> XMLDocument:
     f"""
     Crush ruleset info
-    {RulesetsTable.help()}
     """
 
     pools: Dict[int, List[Pool]] = {}
@@ -327,7 +332,7 @@ def show_ruleset_info(ceph: CephInfo) -> Table:
     cluster_bytes = sum(pool.df.size_bytes for pool in ceph.pools.values())
     cluster_objects = sum(pool.df.num_objects for pool in ceph.pools.values())
 
-    for rule in ceph.crush.rules.values():
+    for rule in ceph.crush.crushmap.rules:
         if rule.id not in ceph.osds4rule:
             logger.warning("Skipping visualization of rule %s, as it hs no osd in it", rule.name)
             continue
@@ -343,9 +348,9 @@ def show_ruleset_info(ceph: CephInfo) -> Table:
         row.replication_level = rule.replicated_on
         osds = ceph.osds4rule[rule.id]
         row.num_osd = len(osds)
-        total_sz = sum(osd.free_space + osd.used_space for osd in osds)
+        total_sz = sum(osd.space.free_space + osd.space.used_space for osd in osds)
         row.total_size = total_sz
-        total_free = sum(osd.free_space for osd in osds)
+        total_free = sum(osd.space.free_space for osd in osds)
         row.free_size = f"{b2ssize(total_free)} ({total_free * 100 // total_sz}%)", total_free
 
         if cluster_bytes:
@@ -389,7 +394,7 @@ def show_ruleset_info(ceph: CephInfo) -> Table:
         row.disk_types = ["data: " + ", ".join(storage_disks_types), "wal/db/j: " + ", ".join(journal_disks_types)]
         row.data_disk_models = sorted(disks_info)
 
-    return table
+    return table_to_doc(table)
 
 
 @tab("Cluster err/warn")
@@ -398,34 +403,33 @@ def show_cluster_err_warn(ceph: CephInfo) -> str:
 
 
 class NetsTable(Table):
-    mask = ident(help="Network mask")
-    roles = ident("Ceph roles", help="Ceph roles, this network is used for (client/cluster)")
-    mtus = ident("MTU's", help="MTU's set on adaters of nodes")
-    bw = ident("Interfaces<br>speeds<br>bits per second",
-               help="Interfaces speed settings in Gbps (10**9 bits per second)")
-    data_transferred = bytes_sz("Bytes<br>transferred",
-                                help="Total bytes transferred (send+recv) on all adapters between reports")
-    pps_transferred = count("Packets<br>transferred",
-                            help="Total packets transferred (send+recv) on all adapters between reports")
-    multicast = count("Multicast<br>packets",
-                      help="Total count of multicast packages received on all adapters between reports")
-    total_err = count("Wire<br>errors",
-                      help="Total count if transmit errors between reports during all nodes uptime")
-    data_transferred_uptime = bytes_sz("Bytes<br>transferred<br>uptime",
-                                       help="Bytes transferred during all nodes uptime")
-    pps_transferred_uptime = count("Packets<br>transferred<br>uptime",
-                                   help="Total packets transferred (send+recv) on all " +
-                                        "adapters  during all nodes uptime")
-    multicast_uptime = count("Multicast<br>packets<br>uptime",
-                             help="Total multicast packages received on all adapters during all nodes uptime")
-    total_err_uptime = count("Errors<br>uptime", help="Total error on all adapters during all nodes uptime")
+    mask = Column.s(help="Network mask")
+    roles = Column.s("Ceph roles", help="Ceph roles, this network is used for (client/cluster)")
+    mtus = Column.s("MTU's", help="MTU's set on adaters of nodes")
+    bw = Column.s("Interfaces<br>speeds<br>bits per second",
+                  help="Interfaces speed settings in Gbps (10**9 bits per second)")
+    data_transferred = Column.sz("Bytes<br>transferred",
+                                 help="Total bytes transferred (send+recv) on all adapters between reports")
+    pps_transferred = Column.i("Packets<br>transferred",
+                               help="Total packets transferred (send+recv) on all adapters between reports")
+    multicast = Column.i("Multicast<br>packets",
+                         help="Total count of multicast packages received on all adapters between reports")
+    total_err = Column.i("Wire<br>errors",
+                         help="Total count if transmit errors between reports during all nodes uptime")
+    data_transferred_uptime = Column.sz("Bytes<br>transferred<br>uptime",
+                                        help="Bytes transferred during all nodes uptime")
+    pps_transferred_uptime = Column.i("Packets<br>transferred<br>uptime",
+                                      help="Total packets transferred (send+recv) on all " +
+                                           "adapters  during all nodes uptime")
+    multicast_uptime = Column.i("Multicast<br>packets<br>uptime",
+                                help="Total multicast packages received on all adapters during all nodes uptime")
+    total_err_uptime = Column.i("Errors<br>uptime", help="Total error on all adapters during all nodes uptime")
 
 
 @tab("Whole cluster net")
-def show_whole_cluster_nets(cluster: Cluster) -> html.HTMLTable:
+def show_whole_cluster_nets(cluster: Cluster) -> XMLDocument:
     f"""
     Cluster networks summary
-    {NetsTable.help()}
     """
 
     table = NetsTable()
@@ -451,19 +455,19 @@ def show_whole_cluster_nets(cluster: Cluster) -> html.HTMLTable:
         row.multicast_uptime = info.usage.rmulticast
         row.total_err_uptime = info.usage.total_err
 
-    return table.html(id=("table-cluster-nets-wide" if any_d_usage else "table-cluster-nets"))
+    tid = "table-cluster-nets-wide" if any_d_usage else "table-cluster-nets"
+    return table_to_doc(table, id=tid)
 
 
 class IssuesTable(Table):
-    type = ident(help="Error short name")
-    count = exact_count(help="Error count of this type")
+    type = Column.s(help="Error short name")
+    count = Column.ei(help="Error count of this type")
 
 
 @tab("Errors summary")
 def show_cluster_err_warn_summary(ceph: CephInfo) -> Optional[str]:
     f"""
     Cluster logs errors/warnings summary and cluster health timeline
-    {IssuesTable.help()}
     """
 
     if not ceph.errors_count:
@@ -474,7 +478,7 @@ def show_cluster_err_warn_summary(ceph: CephInfo) -> Optional[str]:
     for name, cnt in sorted(ceph.errors_count.items(), key=lambda x: x[1]):
         table.add_row(name, cnt)
 
-    res = str(table.html(id="table-errors-summary"))
+    res = doc_to_string(table_to_doc(table, id="table-errors-summary"))
     health_svg = plot_healthnes(ceph)
     if health_svg:
         return f"{res}<br><br><br>{health_svg}"
@@ -493,7 +497,7 @@ def plot_healthnes(ceph: CephInfo, width: int = 1400, height: int = 30) -> Optio
 
     total_len = end - begin
 
-    doc = html.Doc()
+    doc = XMLDocument('div')
 
     begin_s = datetime.datetime.utcfromtimestamp(begin).strftime('%Y-%m-%d %H:%M:%S')
     end_s = datetime.datetime.utcfromtimestamp(end).strftime('%Y-%m-%d %H:%M:%S')
@@ -509,4 +513,4 @@ def plot_healthnes(ceph: CephInfo, width: int = 1400, height: int = 30) -> Optio
             doc.rect(x=curr_x, y=0, width=end_x - curr_x, height=height, style=f"fill:{color}")
             curr_x = end_x
 
-    return str(doc)
+    return doc_to_string(doc)

@@ -1,21 +1,18 @@
 import collections
-from typing import Dict, List, Union, Iterable, Callable, Optional, Tuple, Set
+from typing import Dict, List, Union, Optional, Tuple, Set
 
-from cephlib.units import b2ssize, b2ssize_10
-from cephlib.common import flatten
+from koder_utils import (b2ssize, b2ssize_10, flatten, Table, Column, Disk, LogicBlockDev, group_by, Align, XMLDocument,
+                         SimpleTable)
+from cephlib import CephInfo, CephOSD, Host, FileStoreInfo, BlueStoreInfo, iter_osds_for_rule, CephIOStats
 
-from . import html
-from .cluster_classes import Cluster, CephInfo, CephOSD, Host, FileStoreInfo, BlueStoreInfo, Disk, LogicBlockDev,\
-                             OSDPGStats
-from .visualize_utils import tab, partition_by_len, table_id
+from .cluster import Cluster
+from .visualize_utils import tab, partition_by_len, table_id, table_to_doc
 from .obj_links import host_link, osd_link, mon_link
-from .groupby import group_by
-from .table import Table, bytes_sz, ident, idents_list, exact_count, extra_columns, float_vl, yes_or_no, count
 
 
 @table_id("table-hosts-info")
 @tab("Hosts configs")
-def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> Table:
+def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> XMLDocument:
     mon_hosts = {mon.host.name for mon in ceph.mons.values()}
 
     host2osds: Dict[str, Set[int]] = {}
@@ -23,10 +20,10 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> Table:
         host2osds.setdefault(osd.host.name, set()).add(osd.id)
 
     rule2host2osds: Dict[str, Dict[str, List[CephOSD]]] = {}
-    for rule in ceph.crush.rules.values():
+    for rule in ceph.crush.crushmap.rules:
         curr = rule2host2osds[rule.name] = {}
-        for osd_node in ceph.crush.iter_osds_for_rule(rule.id):
-            osd = ceph.osds[osd_node.id]
+        for osd_id, _ in iter_osds_for_rule(ceph.crush.crushmap, rule.id):
+            osd = ceph.osds[osd_id]
             curr.setdefault(osd.host.name, []).append(osd)
 
     root_names = sorted(rule2host2osds)
@@ -71,8 +68,8 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> Table:
         res = []
         for name in ('nvme', 'ssd', 'hdd'):
             if name in disks:
-                for sz, count in sorted(disks[name].items()):
-                    res.append(f"{sz / 2 ** 40:.1f}" + ("" if count == 1 else f" * {count}"))
+                for sz, Column.i in sorted(disks[name].items()):
+                    res.append(f"{sz / 2 ** 40:.1f}" + ("" if Column.i == 1 else f" * {Column.i}"))
         storage = "<br>".join(res)
 
         root2osd = [rule2host2osds.get(root_name, {}).get(host.name, []) for root_name in root_names]
@@ -97,20 +94,19 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> Table:
     assert '_no_root' not in root_names
 
     class HostsConfigTable(Table):
-        class html_params:
-            align = html.TableAlign.center_right
+        count = Column.ei()
+        names = Column.list(chars_per_line=40)
+        for root_name in root_names:
+            locals()[root_name] = Column.ei(f"osd Column.i for<br>{root_name}")  #
 
-        count = exact_count()
-        names = idents_list(chars_per_line=40)
-        osds_count = extra_columns(exact_count(), _no_root="osd with<br>no root",
-                                   **{root_name: f"osd count for<br>{root_name}" for root_name in root_names})
-        has_mon = ident()
-        cores = exact_count("CPU<br>Cores+HT")
-        ram = bytes_sz("RAM<br>total, GiB")
-        storage_devices = ident("Storage<br>devices")
-        network = ident("Network<br>devices<br>Gb")
-        ceph_cluster_bw = ident("Ceph<br>cluster net<br>GB")
-        ceph_client_bw = ident("Ceph<br>client net<br>GB")
+        no_root = Column.ei("osd with<br>no root")
+        has_mon = Column.s()
+        cores = Column.ei("CPU<br>Cores+HT")
+        ram = Column.sz("RAM<br>total, GiB")
+        storage_devices = Column.s("Storage<br>devices")
+        network = Column.s("Network<br>devices<br>Gb")
+        ceph_cluster_bw = Column.s("Ceph<br>cluster net<br>GB")
+        ceph_client_bw = Column.s("Ceph<br>client net<br>GB")
 
     configs = HostsConfigTable()
 
@@ -121,9 +117,9 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> Table:
         row.count = len(items)
         row.names = [(host_link(itm['name']).link, itm['name']) for itm in items]  # type: ignore
 
-        row.osds_count['_no_root'] = first_item["osds_count"][0]  # type: ignore
+        row.no_root = first_item["osds_count"][0]  # type: ignore
         for name, vl in zip(root_names, first_item["osds_count"][1:]):  # type: ignore
-            row.osds_count[name] = vl
+            row[name] = vl
 
         row.has_mon = 'yes' if first_item["has_mon"] else 'no'
         row.cores = first_item["cores"]
@@ -133,31 +129,29 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> Table:
         row.ceph_client_bw = first_item["client_bw"]
         row.storage_devices = first_item["storage"]
 
-    return configs
+    return table_to_doc(configs, align=Align.center_right, id="table-hosts-info")
 
 
 class HostRunInfo(Table):
-    class html_params:
-        align = html.TableAlign.center_right
-    name = ident()
-    services = ident(dont_sort=True)
-    ram_total = exact_count("RAM<br>total, GiB")
-    ram_free = exact_count("RAM<br>free, GiB")
-    swap = exact_count("Swap<br>used, GiB")
-    cores = exact_count("CPU<br>cores")
-    load = ident("Load avg<br>5m")
-    ip_conn = ident("Conn<br>tcp/udp")
-    ips = idents_list("IP's")
-    scrub_err = exact_count("Total<br>scrub<br>errors")
-    new_scrub_err = exact_count("New<br>scrub<br>errors")
-    net_err = exact_count("New<br>network<br>drop+serr")
-    net_err_no_buff = exact_count("New<br>Dropped<br>no space")
-    net_budget_over = exact_count("New<br>Net budget<br>running out")
+    name = Column.s()
+    services = Column.s(dont_sort=True)
+    ram_total = Column.i("RAM total, GiB")
+    ram_free = Column.i("RAM free, GiB")
+    swap = Column.i("Swap used, GiB")
+    cores = Column.i("CPU cores")
+    load = Column.s("Load avg 5m")
+    ip_conn = Column.s("Conn tcp/udp")
+    ips = Column.list("IP's")
+    scrub_err = Column.i("Total scrub errors")
+    new_scrub_err = Column.i("New scrub errors")
+    net_err = Column.i("New network drop+serr")
+    net_err_no_buff = Column.i("New Dropped no space")
+    net_budget_over = Column.i("New net budget running out")
 
 
 @table_id("table-hosts-run-info")
 @tab("Hosts status")
-def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> Table:
+def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> XMLDocument:
     run_info = HostRunInfo()
     mon_hosts = {mon.host.name for mon in ceph.mons.values()}
 
@@ -184,7 +178,7 @@ def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> Table:
                 srv_strs.append((osd_link(osd_id).link, len(str(osd_id))))
 
         row.services = (mon_str + "<br>" if mon_str else "") + '''<font color="#c77405">OSD's</font>: ''' + \
-                        "<br>".join(", ".join(chunk) for chunk in partition_by_len(srv_strs, 40, 1))  # type: ignore
+            "<br>".join(", ".join(chunk) for chunk in partition_by_len(srv_strs, 40, 1))  # type: ignore
 
         row.ram_total = host.mem_total // 2 ** 30
         row.ram_free = host.mem_free // 2 ** 30
@@ -198,8 +192,8 @@ def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> Table:
 
         if ceph.nodes_pg_info and host.name in ceph.nodes_pg_info:
             pgs_info = ceph.nodes_pg_info[host.name]
-            row.scrub_err = pgs_info.pg_stats.scrub_errors + pgs_info.pg_stats.deep_scrub_errors + \
-                pgs_info.pg_stats.shallow_scrub_errors
+            row.scrub_err = pgs_info.pg_stats.num_scrub_errors + pgs_info.pg_stats.num_deep_scrub_errors + \
+                pgs_info.pg_stats.num_shallow_scrub_errors
 
             if pgs_info.d_pg_stats is not None:
                 row.new_scrub_err = pgs_info.d_pg_stats.scrub_errors + pgs_info.d_pg_stats.deep_scrub_errors + \
@@ -217,25 +211,20 @@ def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> Table:
             row.net_err_no_buff = int(host.d_netstat.dropped_no_space_in_q)
             row.net_budget_over = int(host.d_netstat.no_budget)
 
-    return run_info
+    return table_to_doc(run_info, align=Align.center_right, id="table-hosts-run-info")
 
 
 class HostInfoNet(Table):
-    class html_params:
-        align = html.TableAlign.left_center
-        sortable = False
-        extra_cls = ["hostinfo-net"]
-
-    name = ident()
-    type = ident()
-    duplex = yes_or_no()
-    mtu = exact_count('MTU')
-    speed = count()
-    ips = ident("IP's")
-    roles = ident()
+    name = Column.s()
+    type = Column.s()
+    duplex = Column.yes_or_no()
+    mtu = Column.ei('MTU')
+    speed = Column.i()
+    ips = Column.s("IP's")
+    roles = Column.s()
 
 
-def host_net_table(host: Host, ceph: CephInfo) -> Table:
+def host_net_table(host: Host, ceph: CephInfo) -> XMLDocument:
     cluster_networks = [(ceph.public_net, 'ceph-public'), (ceph.cluster_net, 'ceph-cluster')]
 
     table = HostInfoNet()
@@ -279,7 +268,7 @@ def host_net_table(host: Host, ceph: CephInfo) -> Table:
         if name != 'lo':
             add_adapter_line(host.net_adapters[name], name)
 
-    return table
+    return table_to_doc(table, align=Align.left_center, sortable=False, extra_cls="hostinfo-net")
 
 
 mib_and_mb = lambda x: f"{b2ssize(x)}B / {b2ssize_10(x)}B"
@@ -330,22 +319,21 @@ def html_roles(name: str, stor_roles: Dict[str, Dict[str, Set[int]]]) -> str:
 
 
 class HostInfoDisks(Table):
-    class html_params:
-        extra_cls = ["hostinfo-disks"]
-    name = ident()
-    type = ident()
-    size = ident()
-    roles = ident(dont_sort=True)
-    classes = ident(dont_sort=True)
-    scheduler = ident()
-    model_info = ident()
-    rq_size = exact_count()
-    phy_sec = bytes_sz()
-    min_io = bytes_sz()
+    name = Column.s()
+    type = Column.s()
+    size = Column.s()
+    roles = Column.s(dont_sort=True)
+    classes = Column.s(dont_sort=True)
+    scheduler = Column.s()
+    model_info = Column.s()
+    rq_size = Column.ei()
+    phy_sec = Column.sz()
+    min_io = Column.sz()
 
 
 def host_disks_table(host: Host, ceph: CephInfo,
-                     stor_roles: Dict[str, Dict[str, Set[int]]], stor_classes: Dict[str, Set[str]]) -> Table:
+                     stor_roles: Dict[str, Dict[str, Set[int]]],
+                     stor_classes: Dict[str, Set[str]]) -> XMLDocument:
 
     table = HostInfoDisks()
 
@@ -381,25 +369,21 @@ def host_disks_table(host: Host, ceph: CephInfo,
         row.phy_sec = disk.phy_sec
         row.min_io = disk.min_io
 
-    return table
+    return table_to_doc(table, extra_cls="hostinfo-disks")
 
 
 class HostInfoMountable(Table):
-    class html_params:
-        extra_cls = ["hostinfo-mountable"]
-        sortable = False
-
-    name = ident()
-    type = ident()
-    size = ident()
-    mountpoint = ident(dont_sort=True)
-    ceph_roles = ident()
-    fs = ident()
-    free_space = ident()
-    label = ident()
+    name = Column.s()
+    type = Column.s()
+    size = Column.s()
+    mountpoint = Column.s(dont_sort=True)
+    ceph_roles = Column.s()
+    fs = Column.s()
+    free_space = Column.s()
+    label = Column.s()
 
 
-def host_mountable_table(host: Host, stor_roles: Dict[str, Dict[str, Set[int]]]) -> Table:
+def host_mountable_table(host: Host, stor_roles: Dict[str, Dict[str, Set[int]]]) -> XMLDocument:
 
     table = HostInfoMountable()
 
@@ -421,12 +405,12 @@ def host_mountable_table(host: Host, stor_roles: Dict[str, Dict[str, Set[int]]])
     for _, disk in sorted(host.disks.items()):
         run_over_children(disk, 0)
 
-    return table
+    return table_to_doc(table, extra_cls="hostinfo-mountable", sortable=False)
 
 
 def host_info(host: Host, ceph: CephInfo) -> str:
     stor_roles, stor_classes = find_stor_roles(host, ceph)
-    doc = html.Doc()
+    doc = XMLDocument('div')
     doc.center.H3(host.name)
     doc.br
     doc.center.H4("Interfaces:")
@@ -446,7 +430,7 @@ def host_info(host: Host, ceph: CephInfo) -> str:
 
 
 @tab("Hosts PG's info")
-def show_hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
+def show_hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> XMLDocument:
     header_row = ["Name",
                   "PGs",
                   "User data TiB",
@@ -458,15 +442,14 @@ def show_hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
     if cluster.has_second_report:
         header_row.extend(["User data<br>store rate", "Read<br>iops", "Read Bps", "Write<br>iops", "Write Bps"])
 
-    table = html.HTMLTable("table-hosts-pg-info-long" if cluster.has_second_report else "table-hosts-pg-info",
-                           header_row, align=html.TableAlign.center_right)
+    table = SimpleTable(*header_row)
 
-    def add_pg_stats(stats: OSDPGStats):
-        table.add_cell(str(stats.bytes // 2 ** 40))
-        table.add_cell(str(stats.reads // 10 ** 6))
-        table.add_cell(str(stats.read_b // 2 ** 40))
-        table.add_cell(str(stats.writes // 10 ** 6))
-        table.add_cell(str(stats.write_b // 2 ** 40))
+    def add_pg_stats(stats: CephIOStats):
+        table.add_cell(str(stats.num_bytes // 2 ** 40))
+        table.add_cell(str(stats.num_read // 10 ** 6))
+        table.add_cell(str(stats.num_read_kb // 2 ** 30))
+        table.add_cell(str(stats.num_write // 10 ** 6))
+        table.add_cell(str(stats.num_write_kb // 2 ** 20))
 
     for host in sorted(cluster.hosts.values(), key=lambda x: x.name):
         if host.name in ceph.nodes_pg_info:
@@ -480,4 +463,5 @@ def show_hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
                 add_pg_stats(pgs_info.d_pg_stats)
             table.next_row()
 
-    return table
+    tid = "table-hosts-pg-info-long" if cluster.has_second_report else "table-hosts-pg-info"
+    return table_to_doc(table, id=tid, align=Align.center_right)

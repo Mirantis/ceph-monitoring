@@ -21,11 +21,11 @@ import aiorpc_service
 from aiorpc import ConnectionPool, HistoricCollectionConfig, HistoricCollectionStatus, IAOIRPCNode, iter_unreachable
 from aiorpc_service import get_config as get_aiorpc_config, get_http_conn_pool_from_cfg, get_inventory_path
 from cephlib import parse_ceph_version, CephReport, CephRelease, CephCLI, get_ceph_version, CephRole
-from koder_utils import (make_storage, IStorageNNP, IAsyncNode, LocalHost, get_hostname, ignore_all, get_all_ips,
+from koder_utils import (make_storage, IAsyncNode, LocalHost, get_hostname, ignore_all, get_all_ips, IStorage,
                          b2ssize, rpc_map, read_inventory)
 
 from . import setup_logging, get_file
-from .collectors import LUMINOUS_MAX_PG, DEFAULT_MAX_PG, AUTOPG, ALL_COLLECTORS, Role, CephCollector, Collector
+from .collectors import ALL_COLLECTORS, Role, CephCollector, Collector
 from .utils import CLIENT_NAME_RE, CLUSTER_NAME_RE, re_checker
 from .prom_query import get_block_devs_loads
 
@@ -108,7 +108,7 @@ class RemoteNodesCfg:
 ReportCoro = Coroutine[Any, Any, Optional[Dict[str, Any]]]
 
 
-async def get_collectors(storage: IStorageNNP,
+async def get_collectors(storage: IStorage,
                          opts: Any,
                          pool: ConnectionPool,
                          inventory: Inventory,
@@ -349,6 +349,7 @@ async def run_collection(opts: Any,
                     'all_ips': await get_all_ips(conn)
                 })
 
+        storage.put_raw(str(cfg.ceph_report.version).encode(), "master/version")
         storage.put_raw(json.dumps(nodes_info).encode(), "hosts.json")
         storage.put_raw(json.dumps(cfg.raw_report).encode(), "master/report.json")
 
@@ -483,7 +484,7 @@ async def remove_historic(conn_pool: ConnectionPool, inventory: Inventory) -> No
             logger.info(f"{hostname} Wiped")
 
 
-async def collect_historic(conn_pool: ConnectionPool, inventory: Inventory, storage: IStorageNNP) -> None:
+async def collect_historic(conn_pool: ConnectionPool, inventory: Inventory, storage: IStorage) -> None:
     async def coro(conn: IAOIRPCNode, hostname: str) -> int:
         with storage.get_fd(f"{hostname}.bin", "cb") as fd:
             async for chunk in conn.collect_historic():
@@ -521,9 +522,6 @@ def parse_args(argv: List[str]) -> Any:
     collect_parser.add_argument("--collect-txt", action="store_true", help="Collect human-readable outputs(txt)")
     collect_parser.add_argument("--collect-rgw", action="store_true", help="Collect radosgw info")
     collect_parser.add_argument("--collect-maps", action="store_true", help="Collect txt/binary osdmap/crushmap")
-    collect_parser.add_argument("--max-pg-dump-count", default=AUTOPG, type=int,
-                                help=f"maximum PG count to by dumped with 'pg dump' cmd, by default {LUMINOUS_MAX_PG} "
-                                + f"for luminous, {DEFAULT_MAX_PG} for other ceph versions (%(default)s)")
     collect_parser.add_argument("--ceph-log-max-lines", default=10000, type=int,
                                 help="Max lines from osd/mon log (%(default)s)")
     collect_parser.add_argument("--prometheus", default=None, help="Prometheus url to collect data")

@@ -1,21 +1,13 @@
 import bisect
-import collections
-from typing import Union, Iterable, Dict, Callable, Sequence, Tuple, List, TypeVar, Any
+from typing import Union, Iterable, Callable, Sequence, Tuple, List, TypeVar, Any
 
 import numpy
 
-from .cluster_classes import CephOSD, CephMonitor, CephVersion
+from koder_utils import XMLDocument, SimpleTable, Table, table_to_html
 
 
 class StopError(Exception):
     pass
-
-
-def get_all_versions(services: Iterable[Union[CephOSD, CephMonitor]]) -> Dict[CephVersion, int]:
-    all_version: Dict[CephVersion, int] = collections.Counter()
-    for srv in services:
-        all_version[srv.version] += 1
-    return all_version
 
 
 def tab(name: str) -> Callable[[Callable], Callable]:
@@ -54,6 +46,12 @@ def_color_map: CMap = (
 )
 
 
+def table_to_doc(table: Union[SimpleTable, Table], **attrs) -> XMLDocument:
+    doc = table_to_html(table)
+    doc(**attrs)
+    return doc
+
+
 def val_to_color(val: float, color_map: CMap = def_color_map) -> str:
     idx = [i[0] for i in color_map]
     assert idx == sorted(idx)
@@ -86,7 +84,7 @@ def to_html_histo(vals: Sequence[Union[int, float]],
     elif show_int:
         fmt = lambda x: tostr(int(x))
     else:
-        fmt = lambda x: tostr(x)
+        fmt = tostr
 
     vals_s = set(vals)
     if len(vals_s) == 1:
@@ -97,13 +95,13 @@ def to_html_histo(vals: Sequence[Union[int, float]],
     else:
         if short:
             p0, p50, p100 = numpy.percentile(vals, [0, 50, 100])  # type: ignore
-            return (f"min = {fmt(p0)}<br>mediana = {fmt(p50)}<br>max = {fmt(p100)}", p50)  # type: ignore
+            return f"min = {fmt(p0)}<br>mediana = {fmt(p50)}<br>max = {fmt(p100)}", p50
         else:
             p0, p25, p50, p75, p90, p95, p100 = numpy.percentile(vals, [0, 25, 50, 75, 90, 95, 100])  # type: ignore
 
             msg = f"min = {fmt(p0)}<br>25% < {fmt(p25)}<br>mediana = {fmt(p50)}<br>75% < {fmt(p75)}"  # type: ignore
             msg += f"<br>90% < {fmt(p90)}<br>95% < {fmt(p95)}<br>max = {fmt(p100)}"  # type: ignore
-            return (msg, p50)
+            return msg, p50
 
 
 T = TypeVar('T')
@@ -147,4 +145,3 @@ def table_id(tid: str) -> Callable[[Callable], Callable]:
         func.html_id = tid
         return func
     return closure
-

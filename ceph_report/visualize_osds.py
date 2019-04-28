@@ -5,18 +5,15 @@ from typing import Dict, List, Optional, Union, Tuple, Any, Callable
 import numpy
 from dataclasses import dataclass
 
-from cephlib.units import b2ssize, b2ssize_10
+from koder_utils import (b2ssize, b2ssize_10, LogicBlockDev, DiskType, Disk, seconds_to_str_simple, group_by,
+                         XMLDocument, table_to_html, ok, fail, SimpleTable, Column, Table, doc_to_string, Align,
+                         XMLNode)
 
-from . import html
-from .cluster_classes import CephInfo, OSDStatus, DiskType, CephVersion, BlueStoreInfo, FileStoreInfo, LogicBlockDev, \
-                             Disk, CephOSD
-from .visualize_utils import tab, partition_by_len, to_html_histo, plot, perf_info_required, seconds_to_str_simple
+from cephlib import CephInfo, OSDStatus, CephVersion, BlueStoreInfo, FileStoreInfo, CephOSD
+from .visualize_utils import tab, partition_by_len, to_html_histo, plot, perf_info_required, table_to_doc
 from .obj_links import osd_link, host_link
 from .checks import expected_wr_speed
 from .plot_data import get_histo_img
-from .table import Table, count, bytes_sz, ident, seconds, exact_count, ok_or_fail, idents_list, \
-                   yes_or_no, extra_columns, to_str
-from .groupby import group_by
 
 
 logger = logging.getLogger('report')
@@ -70,7 +67,7 @@ def group_osds(ceph: CephInfo) -> List[List[OSDInfo]]:
             dev_class=osd.class_name if osd.class_name else "",
             reweight=osd.reweight,
             storage_type="bluestore" if isinstance(osd.storage_info, BlueStoreInfo) else "filestore",
-            storage_total=osd.total_space,
+            storage_total=osd.space.total_space,
             storage_dev_type=osd.storage_info.data.dev_info.tp,  # type: ignore
             journal_or_wal_collocated=jinfo.dev_info.dev_path == data_dev_path,
             journal_or_wal_type=jinfo.dev_info.tp,
@@ -86,47 +83,47 @@ def group_osds(ceph: CephInfo) -> List[List[OSDInfo]]:
 
 
 @tab("OSD's state")
-def show_osd_state(ceph: CephInfo) -> html.HTMLTable:
+def show_osd_state(ceph: CephInfo) -> XMLDocument:
     statuses: Dict[OSDStatus, List[str]] = collections.defaultdict(list)
 
     for osd in ceph.osds.values():
         statuses[osd.status].append(str(osd.id))
 
-    table = html.HTMLTable("table-osds-state", ["Status", "Count", "ID's"])
+    table = SimpleTable("Status", "Count", "ID's")
 
     for status, osds in sorted(statuses.items(), key=lambda x: str(x)):
-        table.add_row([html.ok(status.name) if status == OSDStatus.up else html.fail(status.name),
-                       str(len(osds)),
-                      "<br>".join(", ".join(grp) for grp in partition_by_len(osds, 120, 1))])
+        table.add_cells(doc_to_string(ok(status.name) if status == OSDStatus.up else fail(status.name)),
+                        str(len(osds)),
+                        "<br>".join(", ".join(grp) for grp in partition_by_len(osds, 120, 1)))
 
-    return table
+    return table_to_doc(table, id="table-osds-state")
 
 
 class OSDLoadTableAgg(Table):
-    ids = ident("OSD id's", dont_sort=True)
-    node = ident()
-    class_and_rules = ident("Class<br>rules")
-    pgs = ident("PG's", dont_sort=True)
-    open_files = ident("open<br>files")
-    ip_conn = ident("ip<br>conn")
-    threads = ident("Thread<br>count")
-    rss = ident("RSS")
-    vmm = ident("VMM")
-    cpu_used = ident("CPU<br>Used, s")
-    data = ident("Total<br>data")
-    read_ops = ident("Read<br>ops<br>uptime")
-    read = ident("Read<br>uptime")
-    write_ops = ident("Write<br>ops<br>uptime")
-    write = ident("Write<br>uptime")
+    ids = Column.s("OSD id's", dont_sort=True)
+    node = Column.s()
+    class_and_rules = Column.s("Class<br>rules")
+    pgs = Column.s("PG's", dont_sort=True)
+    open_files = Column.s("open<br>files")
+    ip_conn = Column.s("ip<br>conn")
+    threads = Column.s("Thread<br>count")
+    rss = Column.s("RSS")
+    vmm = Column.s("VMM")
+    cpu_used = Column.s("CPU<br>Used, s")
+    data = Column.s("Total<br>data")
+    read_ops = Column.s("Read<br>ops<br>uptime")
+    read = Column.s("Read<br>uptime")
+    write_ops = Column.s("Write<br>ops<br>uptime")
+    write = Column.s("Write<br>uptime")
 
 
 @tab("OSD process info aggregated")
-def show_osd_proc_info_agg(ceph: CephInfo) -> html.HTMLTable:
+def show_osd_proc_info_agg(ceph: CephInfo) -> XMLDocument:
 
     records: Dict[Tuple[str, str, Tuple[str, ...]], List[CephOSD]] = collections.defaultdict(list)
-
+    id2rule = {rule.id: rule for rule in ceph.crush.crushmap.rules}
     for osd in ceph.osds.values():
-        rules = tuple(ceph.crush.rules[rule_id].name for rule_id in osd.crush_rules_weights)
+        rules = tuple(id2rule[rule_id].name for rule_id in osd.crush_rules_weights)
         records[(osd.host.name, osd.class_name if osd.class_name else '', rules)].append(osd)
 
     table = OSDLoadTableAgg()
@@ -156,39 +153,39 @@ def show_osd_proc_info_agg(ceph: CephInfo) -> html.HTMLTable:
                                       short=True, tostr=b2ssize_10)  # type: ignore
         row.write = to_html_histo([osd.pg_stats.write_b for osd in osds], short=True, tostr=b2ssize)  # type: ignore
 
-
-    return table.html(id="table-osd-process-info-agg", align=html.TableAlign.left_right)
+    return table_to_doc(table, id="table-osd-process-info-agg", align=Align.left_right)
 
 
 class OSDLoadTable(Table):
-    id = ident()
-    node = ident()
-    class_ = ident("Class")
-    rules = ident("rules")
-    pgs = exact_count("PG's")
-    open_files = exact_count("open<br>files")
-    ip_conn = ident("ip<br>conn")
-    threads = exact_count("thr")
-    rss = ident("RSS<br>GiB")
-    vmm = ident("VMM<br>GiB")
-    cpu_used = ident("CPU Used<br>per 1h uptime")
-    data = ident("Total<br>data, GiB")
-    write_ops = ident("Write<br>Mops<br>total")
-    write = ident("Write<br>total, TiB")
-    read_ops = ident("Read<br>Mops<br>total")
-    read = ident("Read<br>total, TiB")
+    id = Column.s()
+    node = Column.s()
+    class_ = Column.s("Class")
+    rules = Column.s("rules")
+    pgs = Column.ei("PG's")
+    open_files = Column.ei("open<br>files")
+    ip_conn = Column.s("ip<br>conn")
+    threads = Column.ei("thr")
+    rss = Column.s("RSS<br>GiB")
+    vmm = Column.s("VMM<br>GiB")
+    cpu_used = Column.s("CPU Used<br>per 1h uptime")
+    data = Column.s("Total<br>data, GiB")
+    write_ops = Column.s("Write<br>Mops<br>total")
+    write = Column.s("Write<br>total, TiB")
+    read_ops = Column.s("Read<br>Mops<br>total")
+    read = Column.s("Read<br>total, TiB")
 
 
 @tab("OSD process info")
-def show_osd_proc_info(ceph: CephInfo) -> html.HTMLTable:
+def show_osd_proc_info(ceph: CephInfo) -> XMLDocument:
     table = OSDLoadTable()
+    id_to_rule = {rule.id: rule for rule in ceph.crush.crushmap.rules}
     for osd in ceph.sorted_osds:
         row = table.next_row()
         row.id = osd_link(osd.id).link, osd.id
         row.node = host_link(osd.host.name).link, osd.host.name
         row.pgs = osd.pg_count
         row.class_ = osd.class_name
-        row.rules = ', '.join(ceph.crush.rules[rule_id].name for rule_id in osd.crush_rules_weights)
+        row.rules = ', '.join(id_to_rule[rule_id].name for rule_id in osd.crush_rules_weights)
 
         def tostr(v: float) -> str:
             if v > 10:
@@ -213,37 +210,37 @@ def show_osd_proc_info(ceph: CephInfo) -> html.HTMLTable:
         row.read = tostr(osd.pg_stats.read_b / 2 ** 40)
         row.write_ops = tostr(osd.pg_stats.writes / 10 ** 6)
         row.write = tostr(osd.pg_stats.write_b / 2 ** 40)
-    return table.html(id="table-osd-process-info", align=html.TableAlign.left_right)
+    return table_to_doc(table, id="table-osd-process-info", align=Align.left_right)
 
 
 @tab("OSD info")
-def show_osd_info(ceph: CephInfo) -> html.HTMLTable:
+def show_osd_info(ceph: CephInfo) -> XMLDocument:
     class OSDInfoTable(Table):
-        # id = html.ident()
-        count = exact_count()
-        ids = idents_list(chars_per_line=50)
-        node = ident()
-        status = ok_or_fail()
-        version = ident("version [hash]")
-        daemon_runs = yes_or_no("daemon<br>run")
-        dev_class = ident("Storage<br>class")
+        # id = html.Column.s()
+        count = Column.ei()
+        ids = Column.list(chars_per_line=50)
+        node = Column.s()
+        status = Column.ok_or_fail()
+        version = Column.s("version [hash]")
+        daemon_runs = Column.yes_or_no("daemon<br>run")
+        dev_class = Column.s("Storage<br>class")
 
-        weights = extra_columns(ident(), **{f"w_{rule.name}": f"Weight for<br>{rule.name}"
-                                            for rule in ceph.crush.rules.values()})
+        for rule in ceph.crush.crushmap.rules:
+            locals()[f"w_{rule.name}"] = Column.s(f"Weight for<br>{rule.name}")
 
-        reweight = ident()
-        pg = ident("PG")
-        scrub_err = exact_count("Scrub<br>ERR")
-        storage_type = ident("Type")
-        storage_dev = ident("Storage<br>dev type")
-        storage_total = bytes_sz("Storage<br>total")
-        journal_or_wal_collocated = ident("Journal<br>or wal<br>colocated")
-        journal_or_wal_type = ident("Journal<br>or wal<br>dev type")
-        journal_or_wal_size = ident("Journal<br>or wal<br>size")
-        journal_on_file = yes_or_no("Journal<br>on file", true_fine=False)
-        db_collocated = ident("DB<br>colocated")
-        db_type = ident("DB<br>dev type")
-        db_size = ident("DB<br>size")
+        reweight = Column.s()
+        pg = Column.s("PG")
+        scrub_err = Column.ei("Scrub<br>ERR")
+        storage_type = Column.s("Type")
+        storage_dev = Column.s("Storage<br>dev type")
+        storage_total =Column.sz("Storage<br>total")
+        journal_or_wal_collocated = Column.s("Journal<br>or wal<br>colocated")
+        journal_or_wal_type = Column.s("Journal<br>or wal<br>dev type")
+        journal_or_wal_size = Column.s("Journal<br>or wal<br>size")
+        journal_on_file = Column.yes_or_no("Journal<br>on file", true_fine=False)
+        db_collocated = Column.s("DB<br>colocated")
+        db_type = Column.s("DB<br>dev type")
+        db_size = Column.s("DB<br>size")
 
     all_versions = [osd.version for osd in ceph.osds.values()]
     all_versions += [mon.version for mon in ceph.mons.values()]
@@ -269,16 +266,16 @@ def show_osd_info(ceph: CephInfo) -> html.HTMLTable:
         assert None not in pgs
         row.pg = to_html_histo(pgs)  # type: ignore
 
-        for rule in ceph.crush.rules.values():
+        for rule in ceph.crush.crushmap.rules:
             weights = [tosd.crush_rules_weights[rule.id] for tosd in osds if rule.id in tosd.crush_rules_weights]
             if weights:
-                row.weights[f"w_{rule.name}"] = to_html_histo(weights, show_int=False)
+                row[f"w_{rule.name}"] = to_html_histo(weights, show_int=False)
 
         if osd.version is None:
-            row.version = html.fail("Unknown"), ""
+            row.version = fail("Unknown"), ""
         else:
             if len(all_versions_set) != 1:
-                color: Callable[[str], Union[str, html.TagProxy]] = html.ok if osd.version == largest_ver else html.fail
+                color: Callable[[str], Union[str, XMLNode]] = ok if osd.version == largest_ver else fail
             else:
                 color = lambda x: x
             row.version = color(str(osd.version)), osd.version
@@ -286,12 +283,12 @@ def show_osd_info(ceph: CephInfo) -> html.HTMLTable:
         row.daemon_runs = osd.daemon_runs
         row.dev_class = osd.class_name
         rew = f"{osd.reweight:.2f}"
-        row.reweight = html.fail(rew) if abs(osd.reweight - 1.0) > .01 else rew
+        row.reweight = fail(rew) if abs(osd.reweight - 1.0) > .01 else rew
         row.storage_type = osd_info.storage_type
 
         assert osd.storage_info
 
-        data_drive_color_fn = (html.ok if osd.storage_info.data.dev_info.tp in fast_drives  # type: ignore
+        data_drive_color_fn = (ok if osd.storage_info.data.dev_info.tp in fast_drives  # type: ignore
                                else lambda x: x)  # type: ignore
         row.storage_dev = data_drive_color_fn(osd.storage_info.data.dev_info.tp.name), \
             osd.storage_info.data.dev_info.tp.name
@@ -299,7 +296,7 @@ def show_osd_info(ceph: CephInfo) -> html.HTMLTable:
         # color = "red" if osd.free_perc < 20 else ( "yellow" if osd.free_perc < 40 else "green")
         # avail_perc_str = H.font(osd.free_perc, color=color)
 
-        row.storage_total = osd.total_space
+        row.storage_total = osd.space.total_space
 
         data_dev_path = osd.storage_info.data.path
 
@@ -319,15 +316,15 @@ def show_osd_info(ceph: CephInfo) -> html.HTMLTable:
             if jinfo.dev_info.tp in (DiskType.nvme, DiskType.sata_ssd, DiskType.sas_ssd):
                 vl = "yes"
             else:
-                vl = html.fail("yes"), "yes"
+                vl = fail("yes"), "yes"
         else:
             vl = "no"
         row.journal_or_wal_collocated = vl
 
-        color = html.ok if jinfo.dev_info.tp in fast_drives else html.fail
+        color = ok if jinfo.dev_info.tp in fast_drives else fail
         row.journal_or_wal_type = color(jinfo.dev_info.tp.name), jinfo.dev_info.tp.name
         size_s = b2ssize(osd_info.journal_or_wal_size)
-        row.journal_or_wal_size = (size_s if osd_info.journal_or_wal_size >= min_size else html.fail(size_s)), \
+        row.journal_or_wal_size = (size_s if osd_info.journal_or_wal_size >= min_size else fail(size_s)), \
             osd_info.journal_or_wal_size
 
         if osd.storage_info is None:
@@ -349,48 +346,48 @@ def show_osd_info(ceph: CephInfo) -> html.HTMLTable:
                 if info.tp in (DiskType.nvme, DiskType.sata_ssd, DiskType.sas_ssd):
                     vl = "yes"
                 else:
-                    vl = html.fail("yes"), "yes"
+                    vl = fail("yes"), "yes"
             else:
                 vl = "no"
 
             row.db_collocated = vl
-            color = html.ok if info.tp in fast_drives else html.fail
+            color = ok if info.tp in fast_drives else fail
             row.db_type = color(info.tp.name), info.tp.name
             size_s = b2ssize(osd_info.db_size)
             assert osd_info.db_size is not None
-            row.db_size = size_s if osd_info.db_size >= min_db_size else html.fail(size_s), osd_info.db_size
+            row.db_size = size_s if osd_info.db_size >= min_db_size else fail(size_s), osd_info.db_size
 
-    return table.html(id="table-osd-info", align=html.TableAlign.left_right)
+    return table_to_doc(table, id="table-osd-info", align=Align.left_right)
 
 
 @tab("OSD's dev uptime average load")
-def show_osd_perf_info(ceph: CephInfo) -> html.HTMLTable:
+def show_osd_perf_info(ceph: CephInfo) -> XMLDocument:
     class Tbl(Table):
-        osd = ident()
-        cls = ident("Class")
-        node = ident()
-        apply_lat = ident("apply<br>lat")
-        commit_lat = ident("commit<br>lat")
-        journal_lat = ident("journal<br>lat")
-        xx = ident("ms<br>avg/osd perf")
-        data_dev = ident("Data<br>dev")
-        data_read = ident("Data read<br>MiBps/iops")
-        data_write = ident("Data write<br>MiBps/iops")
-        data_lat = ident("Data lat<br>ms")
-        data_io_time = to_str("Data<br>IO time<br>ms per s")
-        j_dev = ident("J dev")
-        j_write = ident("J write<br>MiBps/iops")
-        j_lat = ident("J lat<br>ms")
-        j_io_time = to_str("J<br>IO time<br>ms per s")
-        wal_dev = ident("WAL dev")
-        wal_write = ident("WAL write<br>MiBps/iops")
-        wal_lat = ident("WAL lat<br>ms")
-        wal_io_time = to_str("WAL<br>IO time<br>ms per s")
-        db_dev = ident("DB dev")
-        db_read = ident("DB read<br>MiBps/iops")
-        db_write = ident("DB write<br>MiBps/iops")
-        db_lat = ident("DB lat<br>ms")
-        db_io_time = to_str("DB IO<br>time<br>ms per s")
+        osd = Column.s()
+        cls = Column.s("Class")
+        node = Column.s()
+        apply_lat = Column.s("apply<br>lat")
+        commit_lat = Column.s("commit<br>lat")
+        journal_lat = Column.s("journal<br>lat")
+        xx = Column.s("ms<br>avg/osd perf")
+        data_dev = Column.s("Data<br>dev")
+        data_read = Column.s("Data read<br>MiBps/iops")
+        data_write = Column.s("Data write<br>MiBps/iops")
+        data_lat = Column.s("Data lat<br>ms")
+        data_io_time = Column.s("Data<br>IO time<br>ms per s")
+        j_dev = Column.s("J dev")
+        j_write = Column.s("J write<br>MiBps/iops")
+        j_lat = Column.s("J lat<br>ms")
+        j_io_time = Column.s("J<br>IO time<br>ms per s")
+        wal_dev = Column.s("WAL dev")
+        wal_write = Column.s("WAL write<br>MiBps/iops")
+        wal_lat = Column.s("WAL lat<br>ms")
+        wal_io_time = Column.s("WAL<br>IO time<br>ms per s")
+        db_dev = Column.s("DB dev")
+        db_read = Column.s("DB read<br>MiBps/iops")
+        db_write = Column.s("DB write<br>MiBps/iops")
+        db_lat = Column.s("DB lat<br>ms")
+        db_io_time = Column.s("DB IO<br>time<br>ms per s")
 
     def add_dev_info(row: Any, dev: Union[Disk, LogicBlockDev], attr: str, uptime: float, with_read: bool = True):
 
@@ -453,11 +450,11 @@ def show_osd_perf_info(ceph: CephInfo) -> html.HTMLTable:
             add_dev_info(row, osd.storage_info.wal.dev_info, "wal", osd.host.uptime, with_read=False)
             add_dev_info(row, osd.storage_info.db.dev_info, "db", osd.host.uptime)
 
-    return table.html("table-osd-dev-uptime-load")
+    return table_to_doc(table, id="table-osd-dev-uptime-load")
 
 
 @tab("PG copy per OSD")
-def show_osd_pool_pg_distribution(ceph: CephInfo) -> Optional[html.HTMLTable]:
+def show_osd_pool_pg_distribution(ceph: CephInfo) -> Optional[XMLDocument]:
     if ceph.sum_per_osd is None:
         logger.warning("PG copy per OSD: No pg dump data. Probably too many PG")
         return None
@@ -482,22 +479,22 @@ def show_osd_pool_pg_distribution(ceph: CephInfo) -> Optional[html.HTMLTable]:
                 name = ".".join(parts[:best_idx]) + '.' + '<br>' + ".".join(parts[best_idx:])
         name_headers.append(name)
 
-    table = html.HTMLTable("table-pg-per-osd", ["OSD/pool"] + name_headers + ['sum'])
+    table = SimpleTable("OSD/pool", *name_headers, 'sum')
 
     for osd_id, row in sorted(ceph.osd_pool_pg_2d.items()):
         data = [osd_link(osd_id).link] + [row.get(pool_name, 0) for pool_name in pools]  # type: ignore
         data.append(ceph.sum_per_osd[osd_id])  # type: ignore
-        table.add_row(map(str, data))
+        table.add_cells(*map(str, data))
 
     table.add_cell("Total cluster PG", sorttable_customkey=str(max(ceph.osds) + 1))
 
     list(map(table.add_cell, (ceph.sum_per_pool[pool_name] for pool_name in pools)))  # type: ignore
     table.add_cell(str(sum(ceph.sum_per_pool.values())))
-    return table
+    return table_to_doc(table, id="table-pg-per-osd")
 
 
 @tab("PG copy per OSD")
-def show_osd_pool_agg_pg_distribution(ceph: CephInfo) -> Optional[html.HTMLTable]:
+def show_osd_pool_agg_pg_distribution(ceph: CephInfo) -> Optional[XMLDocument]:
     if ceph.sum_per_osd is None:
         logger.warning("PG copy per OSD: No pg dump data. Probably too many PG")
         return None
@@ -509,16 +506,16 @@ def show_osd_pool_agg_pg_distribution(ceph: CephInfo) -> Optional[html.HTMLTable
             pool2osd_count.setdefault(pool_name, []).append((count, osd_id))
 
     class PGAggTable(Table):
-        name = ident()
-        pg = exact_count("PG copies")
-        osds = exact_count("OSDS")
-        min = ident(dont_sort=True)
-        p10 = exact_count("10%")
-        p30 = exact_count("30%")
-        p50 = exact_count("50%")
-        p70 = exact_count("70%")
-        p90 = exact_count("90%")
-        max = ident(dont_sort=True)
+        name = Column.s()
+        pg = Column.ei("PG copies")
+        osds = Column.ei("OSDS")
+        min = Column.s(dont_sort=True)
+        p10 = Column.ei("10%")
+        p30 = Column.ei("30%")
+        p50 = Column.ei("50%")
+        p70 = Column.ei("70%")
+        p90 = Column.ei("90%")
+        max = Column.s(dont_sort=True)
 
     table = PGAggTable()
     for pool_name, counts in pool2osd_count.items():
@@ -535,7 +532,8 @@ def show_osd_pool_agg_pg_distribution(ceph: CephInfo) -> Optional[html.HTMLTable
         row.p50 = counts[int(len(counts) * 0.5)]
         row.p70 = counts[int(len(counts) * 0.7)]
         row.p90 = counts[int(len(counts) * 0.9)]
-    return table.html(id="table-pg-per-osd-agg")
+
+    return table_to_doc(table, id="table-pg-per-osd-agg")
 
 
 @plot

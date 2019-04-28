@@ -21,12 +21,12 @@ import seaborn
 seaborn.set()
 del seaborn
 
-from cephlib.storage import make_storage, TypedStorage
+from koder_utils import make_storage, TypedStorage, table
 
+from . import setup_logging, get_file
 from .cluster import load_all, fill_usage, fill_cluster_nets_roles
 from .obj_links import host_link
 from .report import Report
-from . import table
 
 from .visualize_utils import StopError
 from .visualize_cluster import show_cluster_summary, show_issues_table, show_primary_settings, show_ruleset_info, \
@@ -39,7 +39,6 @@ from .visualize_host_load import show_host_io_load_in_color, show_host_network_l
 from .visualize_osds import show_osd_state, show_osd_info, show_osd_perf_info, show_osd_pool_pg_distribution, \
                             show_osd_pool_agg_pg_distribution, show_osd_proc_info, show_osd_proc_info_agg
 from .plot_data import plot_crush_rules, show_osd_used_space_histo
-from .utils import setup_logging, get_file
 
 
 logger = logging.getLogger('report')

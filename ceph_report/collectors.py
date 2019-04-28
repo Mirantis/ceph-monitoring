@@ -14,17 +14,13 @@ from dataclasses import dataclass, field
 from typing import Any, List, Dict, Optional, Tuple, TypeVar, Callable, Coroutine
 
 from aiorpc import IAOIRPCNode, ConnectionPool
-from cephlib import CephRelease, parse_ceph_volumes_js, parse_ceph_disk_js, CephReport
-from koder_utils import (IStorageNNP, CMDResult, parse_devices_tree, collect_process_info, get_host_interfaces,
+from cephlib import CephRelease, parse_ceph_volumes_js, parse_ceph_disk_js, CephReport, OSDDevInfo, OSDBSDevices, \
+    OSDFSDevices
+from koder_utils import (IStorage, CMDResult, parse_devices_tree, collect_process_info, get_host_interfaces,
                          ignore_all, IAsyncNode)
 
 
 logger = logging.getLogger('collect')
-
-
-AUTOPG = -1
-DEFAULT_MAX_PG = 2 ** 15
-LUMINOUS_MAX_PG = 2 ** 17
 
 
 VT = TypeVar('VT', str, bytes, array.array)
@@ -41,7 +37,7 @@ class StorFormat(IntEnum):
 @dataclass
 class Collector:
     """Base class for data collectors. Can collect data for only one node."""
-    storage: IStorageNNP
+    storage: IStorage
     hostname: Optional[str]
     opts: Any
     pool: ConnectionPool
@@ -52,7 +48,7 @@ class Collector:
         self.pretty_json = not self.opts.no_pretty_json
         self.cmds['bash'] = "", StorFormat.txt
 
-    def with_storage(self, storage: IStorageNNP) -> 'Collector':
+    def with_storage(self, storage: IStorage) -> 'Collector':
         return self.__class__(storage, self.hostname, self.opts, self.pool)
 
     @contextlib.asynccontextmanager
@@ -175,7 +171,7 @@ class CephCollector(Collector):
         self.cmds['rados_js'] = f"rados {opt} --format json", StorFormat.json
         self.cmds['rados'] = f"rados {opt}", StorFormat.txt
 
-    def with_storage(self, storage: IStorageNNP) -> 'CephCollector':
+    def with_storage(self, storage: IStorage) -> 'CephCollector':
         return self.__class__(storage, self.hostname, self.opts, self.pool, self.report)
 
 
@@ -216,22 +212,12 @@ async def save_versions(c: CephCollector) -> None:
         coros.append(c("osd_versions_old").ceph("tell 'osd.*' version"))
         coros.append(c("mon_versions_old").ceph("tell 'mon.*' version"))
     else:
-        coros.append(c("versions").ceph("versions"))
-        coros.append(c("mon_metadata").ceph("mon metadata"))
+        coros.append(c("versions").ceph_js("versions"))
+        coros.append(c("mon_metadata").ceph_js("mon metadata"))
 
     coros.append(c("status").ceph_js("status"))
 
-    if AUTOPG == c.opts.max_pg_dump_count:
-        max_pg = (DEFAULT_MAX_PG if pre_luminous else LUMINOUS_MAX_PG)
-    else:
-        max_pg = c.opts.max_pg_dump_count
-
-    cmds = ["df", "auth list", "mon_status", "osd perf", "osd df", "node ls", "features", "time-sync-status"]
-    if c.report.num_pg > max_pg:
-        logger.warning(f"pg dump skipped, as num_pg ({c.report.num_pg}) > max_pg_dump_count ({max_pg})." +
-                       " Use --max-pg-dump-count NUM option to change the limit")
-    else:
-        cmds.append("pg dump")
+    cmds = ["df", "auth list", "mon_status", "osd perf", "osd df", "node ls", "features", "time-sync-status", "pg dump"]
 
     for cmd in cmds:
         coros.append(c().ceph_js(cmd))
@@ -338,7 +324,7 @@ async def collect_osd(c: CephCollector) -> None:
     dev_tree = parse_devices_tree(json.loads(lsblk_js.stdout))
 
     if cephvollist_js.returncode == 0:
-        devs_for_osd: Dict[int, Dict[str, str]] = parse_ceph_volumes_js(cephvollist_js.stdout)
+        devs_for_osd: Dict[int, OSDDevInfo] = parse_ceph_volumes_js(cephvollist_js.stdout)
     else:
         devs_for_osd = {}
 
@@ -366,7 +352,7 @@ async def collect_single_osd(c: CephCollector,
                              osd_id: int,
                              pid: Optional[int],
                              dev_tree: Dict[str, str],
-                             devs: Optional[Dict[str, str]]) -> None:
+                             devs: Optional[OSDDevInfo]) -> None:
 
     await c("log").bash(f"tail -n {c.opts.ceph_log_max_lines} /var/log/ceph/ceph-osd.{osd_id}.log")
     await c("perf_dump").ceph(f"daemon osd.{osd_id} perf dump")
@@ -378,28 +364,26 @@ async def collect_single_osd(c: CephCollector,
         logger.warning(f"osd-{osd_id} in node {c.hostname} is down. No config available")
 
     if devs:
-        stor_type = devs['store_type']
-
-        if stor_type == 'filestore':
-            data_dev = devs["path"]
-            j_dev = devs["journal_dev"]
+        if isinstance(devs, OSDFSDevices):
+            data_dev = str(devs.data)
+            j_dev = str(devs.journal)
             osd_dev_conf = {'data': data_dev,
-                            'journal': j_dev,
+                            'journal': str(j_dev),
                             'r_data': dev_tree[data_dev],
                             'r_journal': dev_tree[j_dev],
-                            'type': stor_type}
+                            'type': 'filestore'}
         else:
-            assert stor_type == 'bluestore'
-            data_dev = devs["block_dev"]
-            db_dev = devs.get('block.db_dev', data_dev)
-            wal_dev = devs.get('block.wal_dev', db_dev)
+            assert isinstance(devs, OSDBSDevices)
+            data_dev = str(devs.block)
+            db_dev = str(devs.db)
+            wal_dev = str(devs.wal)
             osd_dev_conf = {'data': data_dev,
                             'wal': wal_dev,
                             'db': db_dev,
                             'r_data': dev_tree[data_dev],
                             'r_wal': dev_tree[wal_dev],
                             'r_db': dev_tree[db_dev],
-                            'type': stor_type}
+                            'type': 'bluestore'}
 
     else:
         osd_dev_conf = {}
@@ -586,7 +570,7 @@ async def collect_block_devs(c: Collector) -> None:
 
 async def collect_dev(conn: IAsyncNode, is_phy: bool, dev: str) -> Dict[str, Dict[str, str]]:
     interface = {'dev': dev, 'is_phy': is_phy}
-    interfaces = {dev : interface}
+    interfaces = {dev: interface}
 
     if is_phy:
         ethtool_res = await conn.run("ethtool " + dev)

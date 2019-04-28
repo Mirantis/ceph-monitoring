@@ -3,129 +3,19 @@ import collections
 from ipaddress import IPv4Network
 from typing import Dict, Any, List, Union, Tuple, Optional
 
+from dataclasses import dataclass
+
 from koder_utils import parse_info_file_from_proc, AttredDict, TypedStorage
-from cephlib import (PGDump, PG, StatusRegion, Pool, PoolDF, CephVersion, CephMonitor,
-                     MonRole, CephStatus, CephStatusCode, Host, CephInfo, CephOSD, OSDStatus, FileStoreInfo,
-                     BlueStoreInfo, OSDProcessInfo, CephDevInfo, OSDPGStats,
-                     parse_ceph_version, CephRelease, parse_txt_ceph_config, parse_pg_dump,
-                     Crush, parse_ceph_report, parse_pg_distribution, OSDSpace)
+from cephlib import (PGDump, StatusRegion, CephVersion, MonRole, Host, CephInfo, CephOSD, OSDStatus, MonsMetadata,
+                     FileStoreInfo, BlueStoreInfo, OSDProcessInfo, CephDevInfo, parse_ceph_version, CephRelease,
+                     parse_txt_ceph_config, Crush, parse_pg_distribution, OSDSpace, CephReport, parse_cmd_output,
+                     CephStatus, MonMetadata, RadosDF, OSDMapPool, PGStat, CephIOStats, iter_osds_for_rule)
 
 
 logger = logging.getLogger("ceph_report")
 
 
 NO_VALUE = -1
-
-
-def load_monitors(storage: TypedStorage, ver: CephVersion, hosts: Dict[str, Host]) -> Dict[str, CephMonitor]:
-    luminous = ver.release >= CephRelease.luminous
-    if luminous:
-        mons = storage.json.master.status['monmap']['mons']
-    else:
-        srv_health = storage.json.master.status['health']['health']['health_services']
-        assert len(srv_health) == 1
-        mons = srv_health[0]['mons']
-
-    # vers = parse_ceph_version(storage.json.master.versions)
-    result: Dict[str, CephMonitor] = {}
-    mons_meta = {md['name']: md for md in storage.json.master.mons_metadata}
-    for srv in mons:
-
-        mon = CephMonitor(name=srv["name"],
-                          status=None if luminous else srv["health"],
-                          host=hosts[srv["name"]],
-                          role=MonRole.unknown,
-                          version=parse_ceph_version(mons_meta[srv["name"]]["ceph_version"]))
-
-        if luminous:
-            mon.kb_avail = srv["kb_avail"]
-            mon.avail_percent = srv["avail_percent"]
-        else:
-            mon_db_root = "/var/lib/ceph/mon"
-            root = ""
-            for info in mon.host.logic_block_devs.values():
-                if info.mountpoint is not None:
-                    if mon_db_root.startswith(info.mountpoint) and len(root) < len(info.mountpoint):
-                        assert info.free_space is not None
-                        mon.kb_avail = info.free_space
-                        mon.avail_percent = info.free_space * 1024 * 100 // info.size
-                        root = info.mountpoint
-
-            try:
-                ceph_var_dirs_size = storage.txt.mon[f'{srv["name"]}/ceph_var_dirs_size']
-            except KeyError:
-                pass
-            else:
-                for ln in ceph_var_dirs_size.strip().split("\n"):
-                    sz, name = ln.split()
-                    if '/var/lib/ceph/mon' == name:
-                        mon.database_size = int(sz)
-
-        result[mon.name] = mon
-    return result
-
-
-def load_ceph_status(storage: TypedStorage, ver: CephVersion) -> CephStatus:
-    mstorage = storage.json.master
-    pgmap = mstorage.status['pgmap']
-    health = mstorage.status['health']
-    status = health['status'] if 'status' in health else health['overall_status']
-
-    return CephStatus(status=CephStatusCode.from_str(status),
-                      health_summary=health['checks' if ver.release >= CephRelease.luminous else 'summary'],
-                      num_pgs=pgmap['num_pgs'],
-                      bytes_used=pgmap["bytes_used"],
-                      bytes_total=pgmap["bytes_total"],
-                      bytes_avail=pgmap["bytes_avail"],
-                      data_bytes=pgmap["data_bytes"],
-                      pgmap_stat=pgmap,
-                      monmap_stat=mstorage.status['monmap'],
-                      write_bytes_sec=pgmap.get("write_bytes_sec", 0),
-                      write_op_per_sec=pgmap.get("write_op_per_sec", 0),
-                      read_bytes_sec=pgmap.get("read_bytes_sec", 0),
-                      read_op_per_sec=pgmap.get("read_op_per_sec", 0))
-
-
-def load_pools(storage: TypedStorage, ver: CephVersion) -> Dict[int, Pool]:
-    df_info: Dict[int, PoolDF] = {}
-
-    for df_dict in storage.json.master.rados_df['pools']:
-        if 'categories' in df_dict:
-            assert len(df_dict['categories']) == 1
-            df_dict = df_dict['categories'][0]
-
-        del df_dict['name']
-
-        # need 'ints' for older ceph version
-        pool_id = int(df_dict.pop('id'))
-        df_info[pool_id] = PoolDF(size_bytes=int(df_dict['size_bytes']),
-                                  size_kb=int(df_dict['size_kb']),
-                                  num_objects=int(df_dict['num_objects']),
-                                  num_object_clones=int(df_dict['num_object_clones']),
-                                  num_object_copies=int(df_dict['num_object_copies']),
-                                  num_objects_missing_on_primary=int(df_dict['num_objects_missing_on_primary']),
-                                  num_objects_unfound=int(df_dict['num_objects_unfound']),
-                                  num_objects_degraded=int(df_dict['num_objects_degraded']),
-                                  read_ops=int(df_dict['read_ops']),
-                                  read_bytes=int(df_dict['read_bytes']),
-                                  write_ops=int(df_dict['write_ops']),
-                                  write_bytes=int(df_dict['write_bytes']))
-
-    pools: Dict[int, Pool] = {}
-    for info in storage.json.master.osd_dump['pools']:
-        pool_id = int(info['pool'])
-        pools[pool_id] = Pool(id=pool_id,
-                              name=info['pool_name'],
-                              size=int(info['size']),
-                              min_size=int(info['min_size']),
-                              pg=int(info['pg_num']),
-                              pgp=int(info['pg_placement_num']),
-                              crush_rule=int(info['crush_rule'] if ver.release >= CephRelease.luminous
-                                             else info['crush_ruleset']),
-                              extra=info,
-                              df=df_info[pool_id],
-                              apps=list(info.get('application_metadata', {}).keys()))
-    return pools
 
 
 def mem2bytes(vl: str) -> int:
@@ -146,59 +36,63 @@ class CephLoader:
         self.hosts = hosts
         self.osd_perf_counters_dump = osd_perf_counters_dump
         self.osd_historic_ops_paths = osd_historic_ops_paths
-        self.report = parse_ceph_report(self.storage.json.master.report)
+
+        self.version = parse_ceph_version(self.storage.txt.master.version)
+        self.release = self.report.version.release
+
+        self.report: CephReport = parse_cmd_output("ceph report", self.release, self.storage.json.master.report)
+        self.status: CephStatus = parse_cmd_output("ceph status", self.release, self.storage.json.master.status)
+        mons_meta: MonsMetadata = parse_cmd_output("ceph mon metadata", self.release,
+                                                   self.storage.json.master.mon_metadata)
+        self.mon_meta: Dict[str, MonMetadata] = {meta.name: meta for meta in mons_meta.mons}
+        self.crush = Crush(self.report.crushmap)
 
     def get_log_error_count(self) -> Tuple[Optional[List[str]], Any, Any]:
-        errors_count = None
-        status_regions = None
-        err_wrn: Optional[List[str]] = None
 
         for is_file, mon in self.storage.txt.mon:
             if not is_file:
-                err_wrn = self.storage.txt.mon[f"{mon}/ceph_log_wrn_err"].split("\n")
+                err_wrn: List[str] = self.storage.txt.mon[f"{mon}/ceph_log_wrn_err"].split("\n")
                 try:
                     errors_count = self.storage.json.mon[f"{mon}/log_issues_count"]
                 except KeyError:
-                    pass
+                    errors_count = None
 
                 try:
                     status_regions = [StatusRegion(*dt) for dt in self.storage.json.mon[f"{mon}/status_regions"]]
                 except KeyError:
-                    pass
+                    status_regions = None
 
                 return err_wrn, errors_count, status_regions
+        return None, None, None
 
     def load_ceph(self) -> CephInfo:
+
         settings = AttredDict(**parse_txt_ceph_config(self.storage.txt.master.default_config))
 
         err_wrn, errors_count, status_regions = self.get_log_error_count()
 
         logger.debug("Load pools")
-        pools = load_pools(self.storage, self.report.version)
-        name2pool = {pool.name: pool for pool in pools.values()}
+        pools = self.load_pools()
 
-        try:
-            pg_dump = self.storage.json.master.pg_dump
-        except AttributeError:
-            pg_dump = None
+        pg_dump: PGDump = parse_cmd_output("ceph pg dump", self.release, self.storage.json.master.pg_dump)
+        osd_pool_pg_2d = parse_pg_distribution(pg_dump)
 
         logger.debug("Load PG distribution")
-        osd_pool_pg_2d, sum_per_pool, sum_per_osd = parse_pg_distribution(name2pool, pg_dump)
+        name2pool = {pool.name: pool for pool in pools.values()}
+        osd_pool_name_pg_2d = {osd_id: {pools[pid]: count for pid, count in pdata.items()}
+                               for osd_id, pdata in osd_pool_pg_2d.items()}
 
-        if pg_dump:
-            logger.debug("Load pgdump")
-            pgs: Optional[PGDump] = parse_pg_dump(pg_dump)
-        else:
-            pgs = None
+        sum_per_pool = {pool.name: pool.pg for pool in pools.values()}
+        sum_per_osd = {osd.osd: osd.num_pgs for osd in pg_dump.osd_stats}
 
         logger.debug("Preparing PG/osd caches")
 
         osdid2rule: Dict[int, List[Tuple[int, float]]] = {}
-        for rule in self.report.crushmap.rules.values():
-            for osd_node in self.report.crushmap.iter_osds_for_rule(rule.id):
-                osdid2rule.setdefault(osd_node.id, []).append((rule.id, osd_node.weight))
+        for rule in self.report.crushmap.rules:
+            for osd_id, weight in iter_osds_for_rule(self.crush, rule.id):
+                osdid2rule.setdefault(osd_id, []).append((rule.id, weight))
 
-        osds = self.load_osds(sum_per_osd, self.report.crushmap, pgs, osdid2rule)
+        osds = self.load_osds(sum_per_osd, pg_dump, osdid2rule)
         osds4rule: Dict[int, List[CephOSD]] = {}
 
         for osd_id, rule2weights in osdid2rule.items():
@@ -208,20 +102,20 @@ class CephLoader:
         logger.debug("Loading monitors/status")
 
         return CephInfo(osds=osds,
-                        mons=load_monitors(self.storage, self.report.version, self.hosts),
-                        status=load_ceph_status(self.storage, self.report.version),
+                        mons=self.load_monitors(),
+                        status=self.status,
                         version=self.report.version,
                         pools=name2pool,
-                        osd_pool_pg_2d=osd_pool_pg_2d,
+                        osd_pool_pg_2d=osd_pool_name_pg_2d,
                         sum_per_pool=sum_per_pool,
                         sum_per_osd=sum_per_osd,
                         cluster_net=IPv4Network(settings['cluster_network'], strict=False),
                         public_net=IPv4Network(settings['public_network'], strict=False),
                         settings=settings,
-                        pgs=pgs,
+                        pgs=pg_dump,
                         mgrs={},
                         radosgw={},
-                        crush=self.report.crushmap,
+                        crush=self.crush,
                         log_err_warn=err_wrn,
                         osds4rule=osds4rule,
                         errors_count=errors_count,
@@ -274,13 +168,8 @@ class CephLoader:
 
     def load_osds(self,
                   sum_per_osd: Optional[Dict[int, int]],
-                  crush: Crush,
                   pgs: Optional[PGDump],
                   osdid2rule: Dict[int, List[Tuple[int, float]]]) -> Dict[int, CephOSD]:
-        try:
-            fc = self.storage.txt.master.osd_versions
-        except:
-            fc = self.storage.raw.get_raw('master/osd_versions.err').decode()
 
         osd_rw_dict = dict((node['id'], node['reweight'])
                            for node in self.storage.json.master.osd_tree['nodes']
@@ -294,11 +183,11 @@ class CephLoader:
         osd_df_map = {node['id']: node for node in self.storage.json.master.osd_df['nodes']}
         osds: Dict[int, CephOSD] = {}
 
-        osd2pg: Optional[Dict[int, List[PG]]] = None
+        osd2pg: Optional[Dict[int, List[PGStat]]] = None
 
         if pgs:
             osd2pg = collections.defaultdict(list)
-            for pg in pgs.pgs.values():
+            for pg in pgs.pg_stats:
                 for osd_id in pg.acting:
                     osd2pg[osd_id].append(pg)
 
@@ -342,21 +231,11 @@ class CephLoader:
             for rule_id, weight in osdid2rule.get(osd_id, []):
                 crush_rules_weights[rule_id] = weight
 
-            pg_stats: Optional[OSDPGStats] = None
-            osd_pgs: Optional[List[PG]] = None
+            pg_stats: Optional[CephIOStats] = None
+            osd_pgs: Optional[List[PGStat]] = None
 
             if osd2pg:
-                osd_pgs = [pg for pg in osd2pg[osd_id]]
-                bytes = sum(pg.stat_sum.bytes for pg in osd_pgs)
-                reads = sum(pg.stat_sum.read for pg in osd_pgs)
-                read_b = sum(pg.stat_sum.read_kb * 1024 for pg in osd_pgs)
-                writes = sum(pg.stat_sum.write for pg in osd_pgs)
-                write_b = sum(pg.stat_sum.write_kb * 1024 for pg in osd_pgs)
-                scrub_err = sum(pg.stat_sum.scrub_errors for pg in osd_pgs)
-                deep_scrub_err = sum(pg.stat_sum.deep_scrub_errors for pg in osd_pgs)
-                shallow_scrub_err = sum(pg.stat_sum.shallow_scrub_errors for pg in osd_pgs)
-                pg_stats = OSDPGStats(bytes, reads, read_b, writes, write_b, scrub_err, deep_scrub_err,
-                                      shallow_scrub_err)
+                pg_stats = sum(pg.stat_sum for pg in osd2pg[osd_id])
 
             perf_cntrs = None if self.osd_perf_counters_dump is None else self.osd_perf_counters_dump.get(osd_id)
 
@@ -364,7 +243,6 @@ class CephLoader:
                 free_perc = None
             else:
                 free_perc = int((free_space * 100.0) / (free_space + used_space) + 0.5)
-
 
             expected_weights = None if storage_info is None else (storage_info.data.dev_info.size / (1024 ** 4))
             total_space = None if storage_info is None else storage_info.data.dev_info.size
@@ -390,9 +268,64 @@ class CephLoader:
                                    pg_stats=pg_stats,
                                    osd_perf_counters=perf_cntrs,
                                    osd_perf_dump=osd_perf_dump[osd_id]['perf_stats'],
-                                   class_name=crush.nodes_map[f'osd.{osd_id}'].class_name)
+                                   class_name=self.report.crush.nodes_map[f'osd.{osd_id}'].class_name)
 
         return osds
+
+    def load_monitors(self) -> Dict[str, CephMonitor]:
+        result: Dict[str, CephMonitor] = {}
+        luminous = self.release >= CephRelease.luminous
+        for mon in self.status.monmap:
+            mon = CephMonitor(name=mon.name,
+                              host=self.hosts[mon.host],
+                              role=MonRole.unknown,
+                              version=self.mon_meta[mon.name].ceph_version)
+
+            if luminous:
+                mon.kb_avail = mon.kb_avail
+                mon.avail_percent = mon.avail_percent
+            else:
+                mon_db_root = "/var/lib/ceph/mon"
+                root = ""
+                for info in mon.host.logic_block_devs.values():
+                    if info.mountpoint is not None:
+                        if mon_db_root.startswith(info.mountpoint) and len(root) < len(info.mountpoint):
+                            assert info.free_space is not None
+                            mon.kb_avail = info.free_space
+                            mon.avail_percent = info.free_space * 1024 * 100 // info.size
+                            root = info.mountpoint
+
+                try:
+                    ceph_var_dirs_size = self.storage.txt.mon[f'{mon.name}/ceph_var_dirs_size']
+                except KeyError:
+                    pass
+                else:
+                    for ln in ceph_var_dirs_size.strip().split("\n"):
+                        sz, name = ln.split()
+                        if '/var/lib/ceph/mon' == name:
+                            mon.database_size = int(sz)
+
+            result[mon.name] = mon
+        return result
+
+    def load_pools(self) -> Dict[int, Pool]:
+        rados_df: RadosDF = parse_cmd_output("rados df", self.release, self.storage.json.master.rados_df)
+        df_info: Dict[int, RadosDF.RadosDFPoolInfo] = {pool.name: pool for pool in rados_df.pools}
+
+        pools: Dict[int, Pool] = {}
+        for pool in self.report.osdmap.pools:
+            pools[pool.pool] = Pool(id=pool.pool,
+                                    name=pool.pool_name,
+                                    size=pool.size,
+                                    min_size=pool.min_size,
+                                    pg=pool.pg_num,
+                                    pgp=pool.pg_placement_num,
+                                    crush_rule=pool.crush_rule,
+                                    extra=pool,
+                                    df=df_info[pool.pool],
+                                    apps=list(pool.application_metadata.keys()))
+        return pools
+
 
 
 # def load_osd_perf_data(osd_id: int,
