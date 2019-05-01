@@ -3,13 +3,14 @@ import logging
 import urllib.request
 from pathlib import Path
 from urllib.error import URLError
-from typing import Optional, List, Any, Tuple, Dict
+from typing import Optional, List, Tuple, Dict
 
-from .checks import CheckMessage
+from koder_utils import XMLBuilder, RawContent, AnyXML
+
+from . import CheckMessage
+
 
 logger = logging.getLogger('report')
-
-from . import html
 
 
 class Report:
@@ -20,14 +21,14 @@ class Report:
         self.style_links: List[str] = []
         self.script_links: List[str] = []
         self.scripts: List[str] = []
-        self.divs: List[Tuple[str, Optional[str], Optional[str], str]] = []
+        self.divs: List[Tuple[str, Optional[str], Optional[str], AnyXML]] = []
         self.onload: List[str] = ["onHashChanged()"]
         self.issues: Dict[str, List[CheckMessage]] = {}
 
-    def add_block(self, name: str, header: Optional[str], block_obj: Any, menu_item: str = None):
+    def add_block(self, name: str, header: Optional[str], block_obj: XMLBuilder, menu_item: str = None):
         if menu_item is None:
             menu_item = header
-        self.divs.append((name, header, menu_item, str(block_obj)))
+        self.divs.append((name, header, menu_item, block_obj))
 
     def insert_js_css(self, link: str, embed: bool, static_files_dir: Path,
                       output_dir: Optional[Path]) -> Tuple[bool, str]:
@@ -57,7 +58,7 @@ class Report:
         else:
             return False, link
 
-    def make_body(self, embed: bool, output_dir: Optional[Path], static_files_dir) -> html.Doc:
+    def make_body(self, embed: bool, output_dir: Optional[Path], static_files_dir) -> XMLBuilder:
         self.style_links.append("bootstrap.min.css")
         self.style_links.append("report.css")
         self.script_links.append("report.js")
@@ -77,8 +78,7 @@ class Report:
 
         css_links = links[:len(self.style_links)]
         js_links = links[len(self.style_links):]
-
-        doc = html.Doc()
+        doc = XMLBuilder()
         with doc.html:
             with doc.head:
                 doc.title("Ceph cluster report: " + self.cluster_name)
@@ -87,7 +87,7 @@ class Report:
                     doc.link(href=url, rel="stylesheet", type="text/css")
 
                 if self.style:
-                    doc.style("\n".join(self.style), type="text/css")
+                    doc.style(RawContent("\n".join(self.style)), type="text/css")
 
                 for url in js_links:
                     doc.script(type="text/javascript", src=url)
@@ -97,11 +97,12 @@ class Report:
                 code = ";\n".join(self.scripts)
 
                 if embed:
-                    doc.script(code, type="text/javascript")
+                    doc.script(RawContent(code), type="text/javascript")
                 else:
                     assert output_dir is not None
                     (output_dir / "onload.js").open("w").write(code)
                     doc.script(type="text/javascript", src="onload.js")
+
             with doc.body(onload="onload()"):
                 with doc.div(_class="menu-ceph"):
                     with doc.ul():
@@ -122,55 +123,53 @@ class Report:
                         name, header, menu_item, block = div
                         with doc.div(_class="data-ceph", id=name):
                             if header is None:
-                                doc(block)
+                                doc << block
                             else:
                                 doc.H3.center(header)
-                                doc.br
-
-                                if block != "":
-                                    doc.center(block)
+                                doc.br()
+                                doc << block
         return doc
 
-    def encrypt(self, doc: html.Doc, password: str, static_files_dir: Path, output_dir: Path):
-        body_s = str(doc) + " "
-        if len(body_s) % 32:
-            body_s += " " * (32 - len(body_s) % 32)
-
-        import os
-        import base64
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-        from cryptography.hazmat.backends import default_backend
-
-        backend = default_backend()
-        iv = os.urandom(16)
-        cipher = Cipher(algorithms.AES(password), modes.CBC(iv), backend=backend)
-        encryptor = cipher.encryptor()
-        encrypted_body = iv + encryptor.update(body_s.encode("utf8")) + encryptor.finalize()
-        encrypted_body_base64 = base64.b64encode(encrypted_body)
-
-        step = 128
-        header = 'encrypted = "'
-        idx = step - len(header)
-        header += encrypted_body_base64[0: idx] + '"'
-        parts = [header]
-        while idx < len(encrypted_body_base64):
-            parts.append(' + "' + encrypted_body_base64[idx: idx + step] + '"')
-            idx += step
-
-        enc_code = " \\\n      ".join(parts)
-        doc = html.Doc()
-        _, link_or_data = self.insert_js_css("aesjs.js", True, static_files_dir, output_dir)
-
-        with doc.head:
-            doc.script(type="text/javascript", src=link_or_data)
-            doc.script(type="text/javascript")(enc_code)
-
-        with doc.body.center:
-            doc('Report encrypted, to encrypt enter password and press "decrypt": ')
-            doc.input(type="password", id="password")
-            doc.input(type="button",
-                      onclick="decode(document.getElementById('password').value)",
-                      value="Decrypt")
+    # def encrypt(self, doc: XMLDocument, password: str, static_files_dir: Path, output_dir: Path):
+    #     body_s = str(doc) + " "
+    #     if len(body_s) % 32:
+    #         body_s += " " * (32 - len(body_s) % 32)
+    #
+    #     import os
+    #     import base64
+    #     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    #     from cryptography.hazmat.backends import default_backend
+    #
+    #     backend = default_backend()
+    #     iv = os.urandom(16)
+    #     cipher = Cipher(algorithms.AES(password), modes.CBC(iv), backend=backend)
+    #     encryptor = cipher.encryptor()
+    #     encrypted_body = iv + encryptor.update(body_s.encode("utf8")) + encryptor.finalize()
+    #     encrypted_body_base64 = base64.b64encode(encrypted_body)
+    #
+    #     step = 128
+    #     header = 'encrypted = "'
+    #     idx = step - len(header)
+    #     header += encrypted_body_base64[0: idx] + '"'
+    #     parts = [header]
+    #     while idx < len(encrypted_body_base64):
+    #         parts.append(' + "' + encrypted_body_base64[idx: idx + step] + '"')
+    #         idx += step
+    #
+    #     enc_code = " \\\n      ".join(parts)
+    #     doc = XMLDocument('html')
+    #     _, link_or_data = self.insert_js_css("aesjs.js", True, static_files_dir, output_dir)
+    #
+    #     with doc.head:
+    #         doc.script(type="text/javascript", src=link_or_data)
+    #         doc.script(type="text/javascript")(enc_code)
+    #
+    #     with doc.body.center:
+    #         doc('Report encrypted, to encrypt enter password and press "decrypt": ')
+    #         doc.input(type="password", id="password")
+    #         doc.input(type="button",
+    #                   onclick="decode(document.getElementById('password').value)",
+    #                   value="Decrypt")
 
     def render(self, pretty_html: bool = False,
                embed: bool = False, encrypt: str = None) -> str:
@@ -196,4 +195,3 @@ class Report:
 
         # TODO: I dunno why it need's this
         return index.replace("window.onload = sorttable.init", "")
-

@@ -1,15 +1,14 @@
 import collections
-from typing import Callable, Union, Optional, List, Tuple, Dict, Set, Sequence
+from typing import Callable, Union, Optional, List, Tuple, Dict, Set, Sequence, Mapping
 
-from koder_utils import (b2ssize_10, b2ssize, Host, LogicBlockDev, DiskType, Disk, XMLDocument, table_to_html,
-                         SimpleTable, doc_to_string, XMLNode)
+from koder_utils import b2ssize_10, b2ssize, Host, LogicBlockDev, DiskType, Disk, SimpleTable, AnyXML, htag, XMLBuilder
 from .ceph_loader import CephInfo
 from .cluster import Cluster
 from .visualize_utils import val_to_color, perf_info_required, tab, table_to_doc
 from .obj_links import host_link
 
 
-def get_io_attr_average(host: Host, dev: LogicBlockDev, attr: str, uptime: bool) -> Optional[float]:
+def get_io_attr_average(host: Host, dev: LogicBlockDev, attr: str, uptime: bool) -> float:
     if uptime:
         if attr in ('queue_depth', 'lat'):
             return getattr(dev.d_usage, attr)
@@ -23,7 +22,7 @@ def make_storage_devs_load_table(hosts: Sequence[Host],
                                  conversion: Callable[[Union[float, int]], str],
                                  uptime: bool,
                                  max_val: Optional[float],
-                                 min_max_val: Dict[DiskType, float]) -> XMLDocument:
+                                 min_max_val: Mapping[DiskType, float]) -> AnyXML:
 
     tp_remapper: Dict[DiskType, DiskType] = {
         DiskType.nvme: DiskType.nvme,
@@ -94,8 +93,8 @@ def make_storage_devs_load_table(hosts: Sequence[Host],
                 else:
                     s_val = 0 if val < 1 else conversion(val)
 
-                cell_data = doc_to_string(XMLNode('div', text=dev.name, _class="left")) + \
-                    doc_to_string(XMLNode('div', text=s_val, _class="right"))
+                cell_data = ~htag.div(dev.name, _class="left") + htag.div(text=s_val, _class="right")
+
                 if val is not None:
                     table.add_cell(cell_data, bgcolor=color, sorttable_customkey=str(val))
                 else:
@@ -112,7 +111,7 @@ def make_storage_devs_load_table(hosts: Sequence[Host],
 
 @tab("Storage devs load")
 @perf_info_required
-def show_host_io_load_in_color(cluster: Cluster, ceph: CephInfo, uptime: bool) -> str:
+def show_host_io_load_in_color(cluster: Cluster, ceph: CephInfo, uptime: bool) -> AnyXML:
     osd_hosts = {osd.host.name for osd in ceph.osds.values()}
     hosts = [host for _, host in sorted(cluster.hosts.items()) if host.name in osd_hosts]
 
@@ -142,18 +141,22 @@ def show_host_io_load_in_color(cluster: Cluster, ceph: CephInfo, uptime: bool) -
         ('io_time', lambda x: f"{x / 10:.1f}", 'Active time %', {tp: 100 for tp in DiskType}),
     ]
 
-    blocks = []
+    doc = XMLBuilder()
     for pos, (attr, conversion, tp, min_max_val) in enumerate(loads, 1):
         max_val = 300.0 if attr == 'lat' else None
         table = make_storage_devs_load_table(hosts, attr, conversion, uptime, max_val, min_max_val)
-        blocks.append(f"<br><H4>{tp}</H4><br><br>{table}")
+        doc.br()
+        doc.H4(tp)
+        doc.br()
+        doc.br()
+        doc << table
 
-    return "<br>".join(blocks)
+    return doc
 
 
 @tab("Per host net load")
 @perf_info_required
-def show_host_network_load_in_color(cluster: Cluster, ceph: CephInfo) -> str:
+def show_host_network_load_in_color(cluster: Cluster, ceph: CephInfo) -> AnyXML:
     send_net_io: Dict[str, List[Tuple]] = collections.defaultdict(list)
     recv_net_io: Dict[str, List[Tuple]] = collections.defaultdict(list)
 
@@ -163,7 +166,7 @@ def show_host_network_load_in_color(cluster: Cluster, ceph: CephInfo) -> str:
         pb_if = host.find_interface(ceph.public_net)
         nets = [('cluster', cl_if), ('public', pb_if)]
         nets += sorted((net.dev, net) for net in host.net_adapters.values()  # type: ignore
-                       if net is not None and net.is_phy and net != pb_if and net != cl_if )
+                       if net is not None and net.is_phy and net != pb_if and net != cl_if)
 
         uptime = host.uptime
         max_net_count = max(max_net_count, len(nets))
@@ -182,9 +185,10 @@ def show_host_network_load_in_color(cluster: Cluster, ceph: CephInfo) -> str:
 
     std_nets = {'public', 'cluster'}
     ceph_net_count = len(std_nets)
-    tables = []
 
-    for io, name in [(send_net_io, "Send (Bps/Pps)"), (recv_net_io, "Receive (Bps/Pps)")]:
+    doc = XMLBuilder()
+
+    for io, name, last in [(send_net_io, "Send (Bps/Pps)", False), (recv_net_io, "Receive (Bps/Pps)", True)]:
 
         table = SimpleTable("host", "cluster", "public", *(["hw adapter"] * (max_net_count - ceph_net_count)))
 
@@ -202,8 +206,7 @@ def show_host_network_load_in_color(cluster: Cluster, ceph: CephInfo) -> str:
                     if net_name in std_nets:
                         text = load_text
                     else:
-                        text = doc_to_string(XMLNode('div', text=net_name, _class="left")) + \
-                            doc_to_string(XMLNode('div', text=load_text, _class="right"))
+                        text = ~htag.div(net_name, _class="left") + htag.div(load_text, _class="right")
 
                     table.add_cell(text, bgcolor=color, sorttable_customkey=str(load_bps))
 
@@ -212,7 +215,13 @@ def show_host_network_load_in_color(cluster: Cluster, ceph: CephInfo) -> str:
 
             table.next_row()
 
-        tables.append(f"<h4>{name}</h4><br>{table}")
-        tables.append(table_to_doc(table, zebra='false', extra_cls="table-net-load"))
-    return "<br><br><br>".join(tables)
+        doc.h4(name)
+        doc.br()
+        doc << table_to_doc(table, zebra='false', extra_cls="table-net-load")
 
+        if not last:
+            doc.br()
+            doc.br()
+            doc.br()
+
+    return doc

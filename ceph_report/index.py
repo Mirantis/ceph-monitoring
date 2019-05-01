@@ -6,7 +6,6 @@ import sys
 import json
 import time
 import shutil
-import asyncio
 import logging
 import pathlib
 import argparse
@@ -14,11 +13,11 @@ import datetime
 import collections
 from typing import Iterator, List, Dict, Tuple, Any, NamedTuple, Set
 
-from .html import href
-from .table import Table, ident
-from .report import Report
+from ceph_report.visualize_utils import table_to_doc
+from koder_utils import Table, Column, doc_to_string
+
+from . import Report, get_file
 from .checks import CheckMessage, Severity, ErrTarget, ServiceType
-from .collect_info import get_file_path
 from .visualize import make_report, prepare_path
 from .utils import parse_file_name, FileType, FileInfo, FileInfoId, ClusterId
 from .web_storage import SyncApi
@@ -26,6 +25,10 @@ from . import setup_logging
 
 
 logger = logging.getLogger("index")
+
+
+def href(text: str, link: str) -> str:
+    return f'<a href="{link}">{text}</a>'
 
 
 def iter_file_type(path: pathlib.Path, tp: FileType) -> Iterator[FileInfo]:
@@ -110,10 +113,10 @@ class ReportsHTMLIndex:
         latest_info = None
 
         class ClusterTable(Table):
-            last_report = ident(converter=lambda x: f"{x:%Y %b %d} {x:%H %M}")
-            link = ident()
-            issues_link = ident()
-            status = ident()
+            last_report = Column.s(converter=lambda x: f"{x:%Y %b %d} {x:%H %M}")
+            link = Column.s()
+            issues_link = Column.s()
+            status = Column.s()
 
         ct = ClusterTable()
         for info in infos:
@@ -134,22 +137,23 @@ class ReportsHTMLIndex:
                                                 link_to_issues=f"{info.name}#issues",
                                                 issues_summary=", ".join(status))
 
+        tbl_html = doc_to_string(table_to_doc(ct, sortable=False))
         html = f"<html><title>Reports for customer {customer}, cluster {cluster}</title><head>" + \
-            f"{self.css_part}</head><body><center>{ct.html(sortable=False)}</center></body></html>"
+            f"{self.css_part}</head><body><center>{tbl_html}</center></body></html>"
 
         assert latest_info is not None
         return html, latest_info
 
-    def generate_index(self, not_updated_clusters: Set[ClusterId] = None):
+    def generate_index(self, not_updated_clusters: Set[ClusterId] = None) -> None:
         all_clusters: Set[ClusterId] = {(info.customer, info.cluster) for info in self.current_reports.values()}
 
         class IndexTable(Table):
-            customer = ident()
-            cluster = ident()
-            collect_time = ident(converter=lambda x: f"{x:%Y %b %d} {x:%H %M}")
-            link = ident()
-            issues_link = ident()
-            status = ident()
+            customer = Column.s()
+            cluster = Column.s()
+            collect_time = Column.s(converter=lambda x: f"{x:%Y %b %d} {x:%H %M}")
+            link = Column.s()
+            issues_link = Column.s()
+            status = Column.s()
 
         tb = IndexTable()
 
@@ -172,8 +176,9 @@ class ReportsHTMLIndex:
                                  issues_link=href("issues", latest_info.link_to_issues),
                                  status=latest_info.issues_summary)
 
+        tbl_html = doc_to_string(table_to_doc(tb, sortable=False))
         html = f"<html><title>Mirantis customers ceph reports</title><head>" + \
-            f"{self.css_part }</head><body><center>{tb.html(sortable=False)}</center></body></html>"
+            f"{self.css_part }</head><body><center>{tbl_html}</center></body></html>"
 
         with (self.html_folder / f"ceph_report.index.html").open("w") as fd:
             fd.write(html)
@@ -217,7 +222,7 @@ def sync_thread(url: str, user: str, password: str, decrypt_key_file: str,
                 sync_timeout: int = 60, max_decrypt_timeout: int = 30):
     api = SyncApi(url, user, password)
     target = pathlib.Path(target_dir)
-    decrypt = get_file_path("decrypt.sh")
+    decrypt = get_file("decrypt.sh")
     bad_files = set()
 
     if tmp_dir is None:
@@ -243,9 +248,9 @@ def sync_thread(url: str, user: str, password: str, decrypt_key_file: str,
             dec_file = target / enc.ref_name
             if not dec_file.exists():
                 try:
-                    subprocess.check_call([decrypt, str(tmp_dir / enc.name), str(dec_file),
+                    subprocess.check_call([str(decrypt), str(tmp_dir / enc.name), str(dec_file),
                                            str(key_file), decrypt_key_file], timeout=max_decrypt_timeout,
-                                           stdout=subprocess.DEVNULL)
+                                          stdout=subprocess.DEVNULL)
                 except subprocess.CalledProcessError as exc:
                     bad_files.add(enc.name)
                     logger.error(f"Failed to decrypt {enc.name}: {exc}")
@@ -271,7 +276,7 @@ def parse_args(argv):
 
 def main(argv: List[str]):
     opts = parse_args(argv)
-    setup_logging(opts.log_level, get_file_path("logging.json"), None)
+    setup_logging(get_file("logging.json"), opts.log_level, None)
     indexer = ReportsHTMLIndex(html_folder=opts.html_folder, archive_folder=opts.archive_folder)
 
     indexer.load_ready()
@@ -282,8 +287,9 @@ def main(argv: List[str]):
             logger.error("Not all required arguments for sync provided")
             exit(1)
         threading.Thread(target=sync_thread,
-            args=(opts.sync_url, opts.http_user, opts.http_password, opts.decrypt_key, opts.archive_folder),
-            kwargs={"sync_timeout": opts.sync_timeout}, daemon=True).start()
+                         args=(opts.sync_url, opts.http_user,
+                               opts.http_password, opts.decrypt_key, opts.archive_folder),
+                         kwargs={"sync_timeout": opts.sync_timeout}, daemon=True).start()
 
     while True:
         indexer.regenerate()

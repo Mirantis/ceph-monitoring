@@ -3,40 +3,39 @@ from typing import Dict, Optional, Union
 
 import numpy
 
-from koder_utils import (b2ssize_10, b2ssize, Table, Column, XMLDocument, Align, table_to_html, fail, XMLNode,
-                         SimpleTable)
-from cephlib import CephInfo, iter_osds_for_rule
+from koder_utils import b2ssize_10, b2ssize, Table, Column, XMLBuilder, Align, fail, XMLNode, SimpleTable, RawContent
+from cephlib import CephInfo
 
-from .visualize_utils import tab, plot, table_id, perf_info_required, table_to_doc
+from .visualize_utils import tab, plot, perf_info_required, table_to_doc
 from .obj_links import pool_link, rule_link
 from .plot_data import get_histo_img
 
 
-def get_pools_load_table(ceph: CephInfo, uptime: bool) -> XMLDocument:
+def get_pools_load_table(ceph: CephInfo, uptime: bool) -> Table:
     class PoolLoadTable(Table):
-        class html_params:
+        class Params:
             align = Align.left_right
 
         pool = Column.s("Name")
-        data = Column.ei("Data TiB", help="Pool total data in Tebibytes")
-        objs = Column.ei("MObj", help="Millions of objects in pool")
-        total_data_per_pg = Column.ei("Data per PG<br>GiB", help="Average data per PG in Gibibytes")
-        kobj_per_pg = Column.ei("Kobj per PG", help="Average object per PG in thousands")
+        data = Column.ed("Data TiB", help="Pool total data in Tebibytes")
+        objs = Column.ed("MObj", help="Millions of objects in pool")
+        total_data_per_pg = Column.ed("Data per PG<br>GiB", help="Average data per PG in Gibibytes")
+        kobj_per_pg = Column.ed("Kobj per PG", help="Average object per PG in thousands")
 
         if not uptime:
-             new_data = Column.ei("New data<br>MiBps", help="Customer new data rate in Mibibytes per second")
-             new_objs = Column.ei("New objs<br>ps", help="Customer new objects per second")
+            new_data = Column.ed("New data<br>MiBps", help="Customer new data rate in Mibibytes per second")
+            new_objs = Column.ed("New objs<br>ps", help="Customer new objects per second")
 
-        write_ops = Column.ei("Write<br>Mops" if uptime else "Write<br>IOPS",
-                                help="Average data write speed in Mibibytes per second")
-        write_b = Column.ei("Write TiB" if uptime else "Write<br>MiBps")
-        write_per_pg = Column.ei("Write Kops<br>per PG" if uptime else "Writes<br>per PG")
-        avg_write_size = Column.ei("Avg. write<br>size, KiB")
+        write_ops = Column.ed("Write<br>Mops" if uptime else "Write<br>IOPS",
+                              help="Average data write speed in Mibibytes per second")
+        write_b = Column.ed("Write TiB" if uptime else "Write<br>MiBps")
+        write_per_pg = Column.ed("Write Kops<br>per PG" if uptime else "Writes<br>per PG")
+        avg_write_size = Column.ed("Avg. write<br>size, KiB")
 
-        read_ops = Column.ei("Read Mops" if uptime else "Read<br>IOPS")
-        read_b = Column.ei("Read TiB" if uptime else "Read<br>MiBps")
-        read_per_pg = Column.ei("Read Kops<br>per PG" if uptime else "Reads<br>per PG")
-        avg_read_size = Column.ei("Avg. read<br>size, KiB")
+        read_ops = Column.ed("Read Mops" if uptime else "Read<br>IOPS")
+        read_b = Column.ed("Read TiB" if uptime else "Read<br>MiBps")
+        read_per_pg = Column.ed("Read Kops<br>per PG" if uptime else "Reads<br>per PG")
+        avg_read_size = Column.ed("Avg. read<br>size, KiB")
 
     table = PoolLoadTable()
 
@@ -71,42 +70,39 @@ def get_pools_load_table(ceph: CephInfo, uptime: bool) -> XMLDocument:
         if df.read_ops > 10:
             row.avg_read_size = df.read_bytes // df.read_ops // 2 ** 10
 
-    return table_to_html(table)
+    return table
 
 
 @tab("Pool's lifetime load")
-@table_id("table-pools-io-uptime")
-def show_pools_lifetime_load(ceph: CephInfo) -> XMLDocument:
-    return get_pools_load_table(ceph, True)
+def show_pools_lifetime_load(ceph: CephInfo) -> XMLBuilder:
+    return table_to_doc(get_pools_load_table(ceph, True), id="table-pools-io-uptime")
 
 
 @tab("Pool's curr load")
-@table_id("table-pools-io")
 @perf_info_required
-def show_pools_curr_load(ceph: CephInfo) -> XMLDocument:
-    return get_pools_load_table(ceph, False)
+def show_pools_curr_load(ceph: CephInfo) -> XMLBuilder:
+    return table_to_doc(get_pools_load_table(ceph, False), id="table-pools-io")
 
 
 @tab("Pool's stats")
-@table_id("table-pools")
-def show_pools_info(ceph: CephInfo) -> XMLDocument:
+def show_pools_info(ceph: CephInfo) -> XMLBuilder:
     class PoolsTable(Table):
-        class html_params:
+        class Params:
             align = Align.left_right
         pool = Column.s()
-        id = Column.i()
+        id = Column.d()
         size = Column.s()
         obj = Column.s()
         bytes = Column.s()
         ruleset = Column.s()
         apps = Column.list(delim=", ")
         pg = Column.s()
-        osds = Column.ei("OSD's")
+        osds = Column.ed("OSD's")
         space = Column.sz("Total<br>OSD Space")
         avg_obj_size = Column.sz("Obj size")
-        pg_recommended = Column.ei("PG<br>recc.")
+        pg_recommended = Column.ed("PG<br>recc.")
         byte_per_pg = Column.sz("Bytes/PG")
-        obj_per_pg = Column.i("Objs/PG")
+        obj_per_pg = Column.d("Objs/PG")
         pg_count_deviation = Column.s("PG/OSD<br>Deviation")
 
     table = PoolsTable()
@@ -115,15 +111,14 @@ def show_pools_info(ceph: CephInfo) -> XMLDocument:
 
     osds_for_rule: Dict[int, int] = {}
     total_size_for_rule: Dict[int, int] = {}
-    rules_names = [rule.name for rule in ceph.crush.crushmap.rules]
-    id2rule = {rule.id: rule for rule in ceph.crush.crushmap.rules}
+    rules_names = [rule.rule_name for rule in ceph.crush.crushmap.rules]
 
     for _, pool in sorted(ceph.pools.items()):
         row = table.next_row()
         row.pool = pool_link(pool.name).link, pool.name
         row.id = pool.id
 
-        vl: Union[XMLNode, str] = f"{pool.size} / {pool.min_size}"
+        vl: Union[RawContent, str] = f"{pool.size} / {pool.min_size}"
         if pool.name == 'gnocchi':
             if pool.size != 2 or pool.min_size != 1:
                 vl = fail(str(vl))
@@ -138,20 +133,20 @@ def show_pools_info(ceph: CephInfo) -> XMLDocument:
         else:
             row.obj = "-"
 
-        if ceph.status.data_bytes:
-            bytes_perc = pool.df.size_bytes * 100 // ceph.status.data_bytes
+        if ceph.status.pgmap.data_bytes:
+            bytes_perc = pool.df.size_bytes * 100 // ceph.status.pgmap.data_bytes
             row.bytes = f"{b2ssize(pool.df.size_bytes)} ({bytes_perc}%)", pool.df.size_bytes
         else:
             row.bytes = '-'
 
-        rule_name = id2rule[pool.crush_rule].name
+        rule_name = ceph.crush.rule_by_id(pool.crush_rule).rule_name
         cls_name = f"rule{rules_names.index(rule_name)}"
         row.ruleset = f'<div class="{cls_name}">{rule_link(rule_name, pool.crush_rule).link}</div>', pool.crush_rule
 
         if ceph.is_luminous:
             row.apps = pool.apps
 
-        pg_perc = (pool.pg * 100) // ceph.status.num_pgs
+        pg_perc = (pool.pg * 100) // ceph.status.pgmap.num_pgs
 
         if pool.pgp != pool.pg:
             pg_message = f"{pool.pg}, {XMLNode('font', text=str(pool.pgp), color='red')}"
@@ -161,11 +156,11 @@ def show_pools_info(ceph: CephInfo) -> XMLDocument:
         row.pg = pg_message + f" ({pg_perc}%)", pool.pg
 
         if pool.crush_rule not in osds_for_rule:
-            rule = id2rule[pool.crush_rule]
-            all_osd = list(iter_osds_for_rule(ceph.crush, rule))
+            rule = ceph.crush.rule_by_id(pool.crush_rule)
+            all_osd = list(ceph.crush.iter_osds_for_rule(rule))
             osds_for_rule[pool.crush_rule] = len(all_osd)
             total_size_for_rule[pool.crush_rule] = \
-                sum(ceph.osds[osd_id].space.total_space for osd_id, _ in all_osd if ceph.osds[osd_id].space is not None)
+                sum(ceph.osds[osd_id].space.total for osd_id, _ in all_osd if ceph.osds[osd_id].space is not None)
 
         row.osds = osds_for_rule[pool.crush_rule]
         row.space = total_size_for_rule[pool.crush_rule]
@@ -174,7 +169,7 @@ def show_pools_info(ceph: CephInfo) -> XMLDocument:
         row.obj_per_pg = pool.df.num_objects // pool.pg
 
         if ceph.sum_per_osd is not None:
-            osd_ids = [osd_id for osd_id, _ in iter_osds_for_rule(ceph.crush, id2rule[pool.crush_rule])]
+            osd_ids = [osd_id for osd_id, _ in ceph.crush.iter_osds_for_rule(ceph.crush.rule_by_id(pool.crush_rule))]
             osds_pgs = []
 
             for osd_id in osd_ids:
@@ -198,25 +193,25 @@ def show_pools_info(ceph: CephInfo) -> XMLDocument:
 
 
 @tab("PG's status")
-def show_pg_state(ceph: CephInfo) -> XMLDocument:
+def show_pg_state(ceph: CephInfo) -> XMLBuilder:
     statuses: Dict[str, int] = collections.Counter()
 
-    for pg_group in ceph.status.pgmap_stat['pgs_by_state']:
+    for pg_group in ceph.status.pgmap.pgs_by_state:
         for state_name in pg_group['state_name'].split('+'):
             statuses[state_name] += pg_group["count"]
 
     table = SimpleTable("Status", "Count", "%")
-    table.add_cells("any", str(ceph.status.num_pgs), "100.00")
+    table.add_row("any", str(ceph.status.pgmap.num_pgs), "100.00")
     for status, count in sorted(statuses.items()):
-        table.add_cells(status, str(count), f"{100.0 * count / ceph.status.num_pgs:.2f}")
+        table.add_row(status, str(count), f"{100.0 * count / ceph.status.pgmap.num_pgs:.2f}")
 
     return table_to_doc(table, id="table-pgs")
 
 
 @plot
 @tab("PG's sizes histo")
-def show_pg_size_kde(ceph: CephInfo) -> Optional[str]:
+def show_pg_size_kde(ceph: CephInfo) -> Optional[RawContent]:
     if ceph.pgs:
-        vals = [pg.stat_sum.num_bytes / 2 ** 30 for pg in ceph.pgs.pgs.values()]
-        return get_histo_img(numpy.array(vals), xlabel="PG size GiB", y_ticks=True)
+        vals = [pg.stat_sum.num_bytes / 2 ** 30 for pg in ceph.pgs.pg_stats]
+        return RawContent(get_histo_img(numpy.array(vals), xlabel="PG size GiB", y_ticks=True))
     return None

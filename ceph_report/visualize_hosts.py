@@ -1,18 +1,17 @@
 import collections
 from typing import Dict, List, Union, Optional, Tuple, Set
 
-from koder_utils import (b2ssize, b2ssize_10, flatten, Table, Column, Disk, LogicBlockDev, group_by, Align, XMLDocument,
-                         SimpleTable)
-from cephlib import CephInfo, CephOSD, Host, FileStoreInfo, BlueStoreInfo, iter_osds_for_rule, CephIOStats
+from koder_utils import (b2ssize, b2ssize_10, flatten, Table, Column, Disk, LogicBlockDev, group_by, Align, XMLBuilder,
+                         SimpleTable, htag)
+from cephlib import CephInfo, CephOSD, Host, FileStoreInfo, BlueStoreInfo, CephIOStats
 
 from .cluster import Cluster
-from .visualize_utils import tab, partition_by_len, table_id, table_to_doc
+from .visualize_utils import tab, partition_by_len, table_to_doc
 from .obj_links import host_link, osd_link, mon_link
 
 
-@table_id("table-hosts-info")
 @tab("Hosts configs")
-def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> XMLDocument:
+def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> XMLBuilder:
     mon_hosts = {mon.host.name for mon in ceph.mons.values()}
 
     host2osds: Dict[str, Set[int]] = {}
@@ -21,8 +20,8 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> XMLDocument:
 
     rule2host2osds: Dict[str, Dict[str, List[CephOSD]]] = {}
     for rule in ceph.crush.crushmap.rules:
-        curr = rule2host2osds[rule.name] = {}
-        for osd_id, _ in iter_osds_for_rule(ceph.crush.crushmap, rule.id):
+        curr = rule2host2osds[rule.rule_name] = {}
+        for osd_id, _ in ceph.crush.iter_osds_for_rule(rule):
             osd = ceph.osds[osd_id]
             curr.setdefault(osd.host.name, []).append(osd)
 
@@ -61,15 +60,15 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> XMLDocument:
                 else:
                     client_bw = f"{bw / 10 ** 9:.1f}" + (" + unknown" if has_unknown else "")
 
-        disks = collections.defaultdict(collections.Counter)
+        disks: Dict[str, Dict[int, int]] = collections.defaultdict(collections.Counter)
         for disk in host.disks.values():
             disks[disk.tp.short_name][disk.size] += 1
 
         res = []
         for name in ('nvme', 'ssd', 'hdd'):
             if name in disks:
-                for sz, Column.i in sorted(disks[name].items()):
-                    res.append(f"{sz / 2 ** 40:.1f}" + ("" if Column.i == 1 else f" * {Column.i}"))
+                for sz, Column.d in sorted(disks[name].items()):
+                    res.append(f"{sz / 2 ** 40:.1f}" + ("" if Column.d == 1 else f" * {Column.d}"))
         storage = "<br>".join(res)
 
         root2osd = [rule2host2osds.get(root_name, {}).get(host.name, []) for root_name in root_names]
@@ -94,14 +93,14 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> XMLDocument:
     assert '_no_root' not in root_names
 
     class HostsConfigTable(Table):
-        count = Column.ei()
+        count = Column.ed()
         names = Column.list(chars_per_line=40)
         for root_name in root_names:
-            locals()[root_name] = Column.ei(f"osd Column.i for<br>{root_name}")  #
+            locals()[root_name] = Column.ed(f"osd Column.i for<br>{root_name}")  #
 
-        no_root = Column.ei("osd with<br>no root")
+        no_root = Column.ed("osd with<br>no root")
         has_mon = Column.s()
-        cores = Column.ei("CPU<br>Cores+HT")
+        cores = Column.ed("CPU<br>Cores+HT")
         ram = Column.sz("RAM<br>total, GiB")
         storage_devices = Column.s("Storage<br>devices")
         network = Column.s("Network<br>devices<br>Gb")
@@ -135,23 +134,22 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> XMLDocument:
 class HostRunInfo(Table):
     name = Column.s()
     services = Column.s(dont_sort=True)
-    ram_total = Column.i("RAM total, GiB")
-    ram_free = Column.i("RAM free, GiB")
-    swap = Column.i("Swap used, GiB")
-    cores = Column.i("CPU cores")
+    ram_total = Column.d("RAM total, GiB")
+    ram_free = Column.d("RAM free, GiB")
+    swap = Column.d("Swap used, GiB")
+    cores = Column.d("CPU cores")
     load = Column.s("Load avg 5m")
     ip_conn = Column.s("Conn tcp/udp")
     ips = Column.list("IP's")
-    scrub_err = Column.i("Total scrub errors")
-    new_scrub_err = Column.i("New scrub errors")
-    net_err = Column.i("New network drop+serr")
-    net_err_no_buff = Column.i("New Dropped no space")
-    net_budget_over = Column.i("New net budget running out")
+    scrub_err = Column.d("Total scrub errors")
+    new_scrub_err = Column.d("New scrub errors")
+    net_err = Column.d("New network drop+serr")
+    net_err_no_buff = Column.d("New Dropped no space")
+    net_budget_over = Column.d("New net budget running out")
 
 
-@table_id("table-hosts-run-info")
 @tab("Hosts status")
-def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> XMLDocument:
+def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> XMLBuilder:
     run_info = HostRunInfo()
     mon_hosts = {mon.host.name for mon in ceph.mons.values()}
 
@@ -218,27 +216,27 @@ class HostInfoNet(Table):
     name = Column.s()
     type = Column.s()
     duplex = Column.yes_or_no()
-    mtu = Column.ei('MTU')
-    speed = Column.i()
+    mtu = Column.ed('MTU')
+    speed = Column.d()
     ips = Column.s("IP's")
     roles = Column.s()
 
 
-def host_net_table(host: Host, ceph: CephInfo) -> XMLDocument:
+def host_net_table(host: Host, ceph: CephInfo) -> XMLBuilder:
     cluster_networks = [(ceph.public_net, 'ceph-public'), (ceph.cluster_net, 'ceph-cluster')]
 
     table = HostInfoNet()
 
-    def add_adapter_line(adapter, name):
-        tp = "phy" if adapter.is_phy else ('bond' if adapter.dev in host.bonds else 'virt')
-        roles = [role for net, role in cluster_networks if any((ip.ip in net) for ip in adapter.ips)]
+    def add_adapter_line(net_adapter, d_name):
+        tp = "phy" if net_adapter.is_phy else ('bond' if net_adapter.dev in host.bonds else 'virt')
+        roles = [role for net, role in cluster_networks if any((ip.ip in net) for ip in net_adapter.ips)]
         row = table.next_row()
-        row.name = name, adapter.dev
+        row.name = d_name, net_adapter.dev
         row.type = tp
-        row.duplex = adapter.duplex
-        row.mtu = adapter.mtu
-        row.speed = adapter.speed
-        row.ips = "<br>".join(f"{ip.ip} / {ip.net.prefixlen}" for ip in adapter.ips)
+        row.duplex = net_adapter.duplex
+        row.mtu = net_adapter.mtu
+        row.speed = net_adapter.speed if net_adapter.speed else 0
+        row.ips = "<br>".join(f"{ip.ip} / {ip.net.prefixlen}" for ip in net_adapter.ips)
         row.roles = "<br>".join(roles)
 
     all_ifaces = set(host.net_adapters)
@@ -271,7 +269,8 @@ def host_net_table(host: Host, ceph: CephInfo) -> XMLDocument:
     return table_to_doc(table, align=Align.left_center, sortable=False, extra_cls="hostinfo-net")
 
 
-mib_and_mb = lambda x: f"{b2ssize(x)}B / {b2ssize_10(x)}B"
+def mib_and_mb(x: int) -> str:
+    return f"{b2ssize(x)}B / {b2ssize_10(x)}B"
 
 
 def find_stor_roles(host: Host, ceph: CephInfo) -> Tuple[Dict[str, Dict[str, Set[int]]], Dict[str, Set[str]]]:
@@ -326,14 +325,14 @@ class HostInfoDisks(Table):
     classes = Column.s(dont_sort=True)
     scheduler = Column.s()
     model_info = Column.s()
-    rq_size = Column.ei()
+    rq_size = Column.ed()
     phy_sec = Column.sz()
     min_io = Column.sz()
 
 
 def host_disks_table(host: Host, ceph: CephInfo,
                      stor_roles: Dict[str, Dict[str, Set[int]]],
-                     stor_classes: Dict[str, Set[str]]) -> XMLDocument:
+                     stor_classes: Dict[str, Set[str]]) -> XMLBuilder:
 
     table = HostInfoDisks()
 
@@ -361,7 +360,7 @@ def host_disks_table(host: Host, ceph: CephInfo,
         row.name = disk.name
         row.type = disk.tp.name
         row.size = mib_and_mb(disk.size), disk.size
-        row.roles  = html_roles(disk.name, stor_roles)
+        row.roles = html_roles(disk.name, stor_roles)
         if ceph.is_luminous:
             row.classes = "<br>".join(stor_classes.get(disk.name, []))
         row.scheduler = disk.scheduler
@@ -373,7 +372,7 @@ def host_disks_table(host: Host, ceph: CephInfo,
 
 
 class HostInfoMountable(Table):
-    name = Column.s()
+    name = Column.i()
     type = Column.s()
     size = Column.s()
     mountpoint = Column.s(dont_sort=True)
@@ -383,7 +382,7 @@ class HostInfoMountable(Table):
     label = Column.s()
 
 
-def host_mountable_table(host: Host, stor_roles: Dict[str, Dict[str, Set[int]]]) -> XMLDocument:
+def host_mountable_table(host: Host, stor_roles: Dict[str, Dict[str, Set[int]]]) -> XMLBuilder:
 
     table = HostInfoMountable()
 
@@ -397,7 +396,7 @@ def host_mountable_table(host: Host, stor_roles: Dict[str, Dict[str, Set[int]]])
         row.ceph_roles = "" if level == 0 else html_roles(obj.name, stor_roles)
         row.fs = obj.fs
         row.free_space = (mib_and_mb(obj.free_space), obj.free_space) if obj.free_space is not None else ('', 0)
-        row.label  = obj.label
+        row.label = obj.label
 
         for _, ch in sorted(obj.children.items(), key=lambda x: x[1].partition_num):
             run_over_children(ch, level + 1)
@@ -408,29 +407,38 @@ def host_mountable_table(host: Host, stor_roles: Dict[str, Dict[str, Set[int]]])
     return table_to_doc(table, extra_cls="hostinfo-mountable", sortable=False)
 
 
-def host_info(host: Host, ceph: CephInfo) -> str:
+def host_info(host: Host, ceph: CephInfo) -> XMLBuilder:
     stor_roles, stor_classes = find_stor_roles(host, ceph)
-    doc = XMLDocument('div')
+    doc = XMLBuilder()
     doc.center.H3(host.name)
-    doc.br
+    doc.br()
     doc.center.H4("Interfaces:")
-    doc.br
-    doc.center(str(host_net_table(host, ceph)))
-    doc.br
-    doc.br
+    doc.br()
+
+    with doc.center:
+        doc << host_net_table(host, ceph)
+
+    doc.br()
+    doc.br()
     doc.center.H4("HW disks:")
-    doc.br
-    doc.center(str(host_disks_table(host, ceph, stor_roles, stor_classes)))
-    doc.br
-    doc.br
+    doc.br()
+
+    with doc.center:
+        doc << host_disks_table(host, ceph, stor_roles, stor_classes)
+
+    doc.br()
+    doc.br()
     doc.center.H4("Mountable:")
-    doc.br
-    doc.center(str(host_mountable_table(host, stor_roles)))
-    return str(doc)
+    doc.br()
+
+    with doc.center:
+        doc << host_mountable_table(host, stor_roles)
+
+    return doc
 
 
 @tab("Hosts PG's info")
-def show_hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> XMLDocument:
+def show_hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> XMLBuilder:
     header_row = ["Name",
                   "PGs",
                   "User data TiB",

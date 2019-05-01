@@ -46,7 +46,7 @@ class ReportFailed(RuntimeError):
 @dataclass
 class ExceptionWithNode(Exception):
     exc: Exception
-    hostname: str
+    hostname: Optional[str]
 
 
 @dataclass
@@ -115,11 +115,11 @@ async def get_collectors(storage: IStorage,
                          report: CephReport) -> AsyncIterable[Tuple[Optional[str], ReportCoro]]:
 
     for func in ALL_COLLECTORS[Role.base]:
-        yield None, func(Collector(storage, None, opts, pool))
+        yield None, func(Collector(storage, None, opts, pool))  # type: ignore
 
     for func in ALL_COLLECTORS[Role.ceph_master]:
-        yield inventory.ceph_master, \
-            func(CephCollector(storage.sub_storage("master"), inventory.ceph_master, opts, pool, report))
+        collector = CephCollector(storage.sub_storage("master"), inventory.ceph_master, opts, pool, report)
+        yield inventory.ceph_master, func(collector)  # type: ignore
 
     role_mapping = {
         CephRole.osd: Role.ceph_osd,
@@ -135,13 +135,13 @@ async def get_collectors(storage: IStorage,
                 for func in ALL_COLLECTORS.get(role_mapping[role], []):
                     assert role in {CephRole.osd, CephRole.mon}
                     stor = storage if role == CephRole.osd else storage.sub_storage(f"mon/{node}")
-                    yield hostname, func(CephCollector(stor, node, opts, pool, report))
+                    yield hostname, func(CephCollector(stor, node, opts, pool, report))  # type: ignore
 
             for func in ALL_COLLECTORS[Role.node]:
-                yield hostname, func(Collector(storage.sub_storage(f"hosts/{node}"), node, opts, pool))
+                yield hostname, func(Collector(storage.sub_storage(f"hosts/{node}"), node, opts, pool))  # type: ignore
 
         if opts.historic:
-            yield None, collect_historic(pool, inventory, storage.sub_storage("historic"))
+            yield None, collect_historic(pool, inventory, storage.sub_storage("historic"))  # type: ignore
 
 
 def encrypt_and_upload(url: str,
@@ -155,7 +155,7 @@ def encrypt_and_upload(url: str,
     cmd = ["bash", get_file("upload.sh"), report_file, enc_report, key_file, web_cert_file, url]
 
     try:
-        proc = subprocess.run(cmd,
+        proc = subprocess.run(cast(List[str], cmd),
                               stdin=subprocess.PIPE,
                               stderr=subprocess.STDOUT,
                               stdout=subprocess.PIPE,
@@ -238,10 +238,17 @@ async def check_master(conn: IAsyncNode):
 T = TypeVar('T')
 
 
-async def raise_with_node(coro: Coroutine[Any, Any, T], hostname: str) -> T:
+async def raise_with_node(coro: Coroutine[Any, Any, T],
+                          hostname: Optional[str],
+                          done_set: Set[Tuple[Optional[str], Any]]) -> T:
     try:
-        return await coro
+        res = await coro
+        done_set.add((hostname, coro))
+        return res
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        raise
     except Exception as local_exc:
+        done_set.add((hostname, coro))
         raise ExceptionWithNode(local_exc, hostname) from local_exc
 
 
@@ -298,7 +305,7 @@ async def do_preconfig(opts: Any) -> RemoteNodesCfg:
         for host in failed_hosts:
             inv.remove(host)
 
-    osd_nodes = collections.defaultdict(list)
+    osd_nodes: Dict[str, List[int]] = collections.defaultdict(list)
 
     for osd_meta in ceph_report.osd_metadata:
         if osd_meta.hostname in inv:
@@ -337,7 +344,7 @@ async def run_collection(opts: Any,
     # This variable is updated from main function
     if opts.detect_only:
         logger.info(f"Exiting, as detect-only mode requested")
-        return
+        return None
 
     async with cfg.conn_pool:
         nodes_info = []
@@ -349,7 +356,7 @@ async def run_collection(opts: Any,
                     'all_ips': await get_all_ips(conn)
                 })
 
-        storage.put_raw(str(cfg.ceph_report.version).encode(), "master/version")
+        storage.put_raw(str(cfg.ceph_report.version).encode(), "master/version.txt")
         storage.put_raw(json.dumps(nodes_info).encode(), "hosts.json")
         storage.put_raw(json.dumps(cfg.raw_report).encode(), "master/report.json")
 
@@ -364,14 +371,14 @@ async def run_collection(opts: Any,
         all_coros = [(hostname, coro) async for hostname, coro in collectors_coro]
 
         result: Dict[str, Any] = {}
+        done_set: Set[Tuple[Optional[str], Any]] = set()
         try:
-            wrapped_coros = [raise_with_node(coro, hostname) for hostname, coro in all_coros]
+            wrapped_coros = [raise_with_node(coro, hostname, done_set) for hostname, coro in all_coros]
             for res_item in await asyncio.gather(*wrapped_coros, return_exceptions=False):
                 if res_item:
                     assert isinstance(res_item, Dict)
                     assert all(isinstance(key, str) for key in res_item)
                     result.update(res_item)
-
         except ExceptionWithNode as exc:
             logger.error(f"Exception happened during collecting from node " +
                          f"{exc.hostname} (see full tb below): {exc.exc}")
@@ -380,7 +387,9 @@ async def run_collection(opts: Any,
             logger.error(f"Exception happened(see full tb below): {exc}")
             raise
         finally:
-            logger.info("Collecting logs and teardown RPC servers")
+            for hostname, coro in set(all_coros).difference(done_set):
+                logger.warning(f"Still running coro: {hostname}, {coro.cr_code.co_filename}::{coro.cr_code.co_name}")
+            logger.info("Collecting rpc logs")
             for node, _ in cfg.inventory:
                 with ignore_all:
                     async with cfg.conn_pool.connection(node) as conn:
@@ -619,7 +628,9 @@ async def historic_main(opts: Any, subparser: str):
         elif subparser == 'historic_stop':
             await stop_historic(cfg.conn_pool, cfg.inventory)
         elif subparser == 'historic_collect':
-            path = get_output_folder(opts.output_folder, opts.customer, opts.cluster, opts.wipe) / "historic"
+            output_folder = get_output_folder(opts.output_folder, opts.customer, opts.cluster, opts.wipe)
+            assert output_folder
+            path = output_folder / "historic"
             path.mkdir()
             storage = make_storage(str(path), existing=False, serializer='raw')
             logger.info(f"Collecting historic data to {path}")
@@ -661,13 +672,15 @@ def main(argv: List[str]) -> int:
                     print(f"Result saved into {output_folder}")
                 else:
                     assert output_arch is not None
+                    assert output_folder is not None
                     pack_output_folder(output_folder, output_arch)
                     print(f"Result saved into {output_arch}")
                     shutil.rmtree(output_folder)
 
-            res_str = "\n".join(f"       {key:>20s}: {val!r}" for key, val in result.items())
-            if res_str.strip():
-                logger.debug(f"Results:\n{res_str}")
+            if result:
+                res_str = "\n".join(f"       {key:>20s}: {val!r}" for key, val in result.items())
+                if res_str.strip():
+                    logger.debug(f"Results:\n{res_str}")
 
         except ReportFailed:
             return 1

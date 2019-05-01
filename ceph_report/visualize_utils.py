@@ -3,7 +3,7 @@ from typing import Union, Iterable, Callable, Sequence, Tuple, List, TypeVar, An
 
 import numpy
 
-from koder_utils import XMLDocument, SimpleTable, Table, table_to_html
+from koder_utils import XMLBuilder, SimpleTable, Table, table_to_html
 
 
 class StopError(Exception):
@@ -46,7 +46,9 @@ def_color_map: CMap = (
 )
 
 
-def table_to_doc(table: Union[SimpleTable, Table], **attrs) -> XMLDocument:
+def table_to_doc(table: Union[SimpleTable, Table], **attrs) -> XMLBuilder:
+    attrs.pop("sortable", None)
+    attrs.pop("align", None)
     doc = table_to_html(table)
     doc(**attrs)
     return doc
@@ -80,9 +82,9 @@ def to_html_histo(vals: Sequence[Union[int, float]],
                   tostr: Callable[[Any], str] = None) -> Tuple[str, Union[int, float]]:
 
     if tostr is None:
-        fmt = (lambda x: str(int(x + 0.4999))) if show_int else "{0:.2f}".format
+        fmt: Callable[[float], str] = (lambda x: str(int(x + 0.4999))) if show_int else "{0:.2f}".format  # type: ignore
     elif show_int:
-        fmt = lambda x: tostr(int(x))
+        fmt = lambda x: tostr(int(x))  # type: ignore
     else:
         fmt = tostr
 
@@ -138,10 +140,3 @@ def partition_by_len(items: Iterable[Union[T, Tuple[T, int]]],
             curr_len = el_len
     if curr:
         yield curr
-
-
-def table_id(tid: str) -> Callable[[Callable], Callable]:
-    def closure(func):
-        func.html_id = tid
-        return func
-    return closure

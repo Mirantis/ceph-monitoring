@@ -90,6 +90,7 @@ async def handle_put(target_dir: str, min_free_space: int, request: web.Request)
     if shutil.disk_usage("/").free - request.content_length - len(enc_passwd) < min_free_space:
         return web.HTTPBadRequest(reason="No space left on device")
 
+    assert finfo.ref_name is not None
     target_path = os.path.join(target_dir, finfo.ref_name)
     key_file = target_path + ".key"
     meta_file = target_path + ".meta"
@@ -110,8 +111,8 @@ async def handle_put(target_dir: str, min_free_space: int, request: web.Request)
         with open(key_file, "wb") as fd:
             fd.write(enc_passwd.encode("utf8"))
 
-        with open(meta_file, "w") as fd:
-            fd.write(json.dumps({'upload_time': time.time(), 'src_addr': request.remote}))
+        with open(meta_file, "w") as fd2:
+            fd2.write(json.dumps({'upload_time': time.time(), 'src_addr': request.remote}))
 
     except:
         os.unlink(target_path)

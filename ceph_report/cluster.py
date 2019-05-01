@@ -9,22 +9,21 @@ from typing import Dict, Any, List, Tuple, Optional, Iterable
 import numpy
 
 from koder_utils import (AttredStorage, TypedStorage, parse_lshw_info, Host, parse_netdev, parse_ipa, NetStats, Disk,
-                         LogicBlockDev, is_routable, NetworkBond, NetworkAdapter, NetAdapterAddr, BlockUsage,
+                         LogicBlockDev, is_routable, NetworkBond, NetworkAdapter, NetAdapterAddr,
                          AggNetStat, ClusterNetData, parse_df, parse_diskstats, parse_lsblkjs)
 
-from cephlib import OSDPGStats, PoolDF, CephInfo
+from cephlib import CephInfo
 from koder_utils.linux import parse_meminfo
 
-from .ceph_loader import CephLoader
+from . import CephLoader
 
 logger = logging.getLogger("ceph_report")
-
 
 
 @dataclass
 class Cluster:
     hosts: Dict[str, Host]
-    ip2host: Dict[str, Host]
+    ip2host: Dict[IPv4Address, Host]
     report_collected_at_local: str
     report_collected_at_gmt: str
     report_collected_at_gmt_s: float
@@ -228,7 +227,7 @@ def load_perf_monitoring(storage: TypedStorage) -> Tuple[Optional[Dict[int, List
 class Loader:
     def __init__(self, storage: TypedStorage) -> None:
         self.storage = storage
-        self.ip2host: Dict[str, Host] = {}
+        self.ip2host: Dict[IPv4Address, Host] = {}
         self.hosts: Dict[str, Host] = {}
         self.osd_historic_ops_paths: Any = None
         self.osd_perf_counters_dump: Any = None
@@ -237,7 +236,7 @@ class Loader:
         self.osd_perf_counters_dump, self.osd_historic_ops_paths = load_perf_monitoring(self.storage)
 
     def load_cluster(self) -> Cluster:
-        coll_time = self.storage.txt['master/collected_at'].strip()
+        coll_time = self.storage.txt.collected_at.strip()
         report_collected_at_local, report_collected_at_gmt, _ = coll_time.split("\n")
         coll_s = datetime.datetime.strptime(report_collected_at_gmt, '%Y-%m-%d %H:%M:%S')
 
@@ -247,7 +246,7 @@ class Loader:
                        report_collected_at_gmt=report_collected_at_gmt,
                        report_collected_at_gmt_s=coll_s.timestamp())
 
-    def load_hosts(self) -> Tuple[Dict[str, Host], Dict[str, Host]]:
+    def load_hosts(self) -> Tuple[Dict[str, Host], Dict[IPv4Address, Host]]:
         tcp_sock_re = re.compile('(?im)^tcp6?\\b')
         udp_sock_re = re.compile('(?im)^udp6?\\b')
 
@@ -295,12 +294,11 @@ class Loader:
             for adapter in net_adapters.values():
                 for ip in adapter.ips:
                     if ip.is_routable:
-                        ip_s = str(ip.ip)
-                        if ip_s in self.ip2host:
-                            logger.error("Ip %s belong to both %s and %s. Skipping new host",
-                                         ip_s, hostname, self.ip2host[ip_s].name)
+                        if ip.ip in self.ip2host:
+                            logger.error(f"Ip {ip.ip} belong to both {hostname} and " +
+                                         f"{self.ip2host[ip.ip].name}. Skipping new host")
                             continue
-                        self.ip2host[ip_s] = host
+                        self.ip2host[ip.ip] = host
 
         return self.hosts, self.ip2host
 
@@ -336,39 +334,14 @@ def fill_usage(cluster: Cluster, cluster_old: Cluster, ceph: CephInfo, ceph_old:
             dwio_time = dev.usage.w_io_time - dev_old.usage.w_io_time
             d_iops = dev.usage.iops - dev_old.usage.iops
 
-            dev.d_usage = BlockUsage(
-                read_bytes=(dev.usage.read_bytes - dev_old.usage.read_bytes) / dtime,
-                write_bytes=(dev.usage.write_bytes - dev_old.usage.write_bytes) / dtime,
-                total_bytes=(dev.usage.total_bytes - dev_old.usage.total_bytes) / dtime,
-                read_iops=(dev.usage.read_iops - dev_old.usage.read_iops) / dtime,
-                write_iops=(dev.usage.write_iops - dev_old.usage.write_iops) / dtime,
-                io_time=dio_time / dtime,
-                w_io_time=dwio_time / dtime,
-                iops=d_iops / dtime,
-                queue_depth=dwio_time / dio_time if dio_time > 1000 else None,
-                lat=dio_time / d_iops if d_iops > 100 else None)
+            dev.d_usage = (dev.usage - dev_old.usage) / dtime
+            dev.queue_depth = dwio_time / dio_time if dio_time > 1000 else None,
+            dev.lat = dio_time / d_iops if d_iops > 100 else None
 
         for dev_name, netdev in host.net_adapters.items():
             netdev_old = host_old.net_adapters[dev_name]
             assert not netdev.d_usage
-            netdev.d_usage = NetStats(
-                    recv_bytes=int((netdev.usage.recv_bytes - netdev_old.usage.recv_bytes) / dtime + 0.499),
-                    recv_packets=int((netdev.usage.recv_packets - netdev_old.usage.recv_packets) / dtime + 0.499),
-                    rerrs=int((netdev.usage.rerrs - netdev_old.usage.rerrs) / dtime + 0.499),
-                    rdrop=int((netdev.usage.rdrop - netdev_old.usage.rdrop) / dtime + 0.499),
-                    rfifo=int((netdev.usage.rfifo - netdev_old.usage.rfifo) / dtime + 0.499),
-                    rframe=int((netdev.usage.rframe - netdev_old.usage.rframe) / dtime + 0.499),
-                    rcompressed=int((netdev.usage.rcompressed - netdev_old.usage.rcompressed) / dtime + 0.499),
-                    rmulticast=int((netdev.usage.rmulticast - netdev_old.usage.rmulticast) / dtime + 0.499),
-                    send_bytes=int((netdev.usage.send_bytes - netdev_old.usage.send_bytes) / dtime + 0.499),
-                    send_packets=int((netdev.usage.send_packets - netdev_old.usage.send_packets) / dtime + 0.499),
-                    serrs=int((netdev.usage.serrs - netdev_old.usage.serrs) / dtime + 0.499),
-                    sdrop=int((netdev.usage.sdrop - netdev_old.usage.sdrop) / dtime + 0.499),
-                    sfifo=int((netdev.usage.sfifo - netdev_old.usage.sfifo) / dtime + 0.499),
-                    scolls=int((netdev.usage.scolls - netdev_old.usage.scolls) / dtime + 0.499),
-                    scarrier=int((netdev.usage.scarrier - netdev_old.usage.scarrier) / dtime + 0.499),
-                    scompressed=int((netdev.usage.scompressed - netdev_old.usage.scompressed) / dtime + 0.499)
-                )
+            netdev.d_usage = (netdev.usage.recv_bytes - netdev_old.usage.recv_bytes) / dtime
 
         assert not host.d_netstat
         if host.netstat and host_old.netstat:
@@ -381,36 +354,13 @@ def fill_usage(cluster: Cluster, cluster_old: Cluster, ceph: CephInfo, ceph_old:
         osd_old = ceph_old.osds[osd.id]
 
         assert osd_old.pg_stats
-        osd.d_pg_stats = OSDPGStats(
-            bytes=int((osd.pg_stats.bytes - osd_old.pg_stats.bytes) / dtime),
-            reads=int((osd.pg_stats.reads - osd_old.pg_stats.reads) / dtime),
-            read_b=int((osd.pg_stats.read_b - osd_old.pg_stats.read_b) / dtime),
-            writes=int((osd.pg_stats.writes - osd_old.pg_stats.writes) / dtime),
-            write_b=int((osd.pg_stats.write_b - osd_old.pg_stats.write_b) / dtime),
-            scrub_errors=int((osd.pg_stats.scrub_errors - osd_old.pg_stats.scrub_errors) / dtime),
-            deep_scrub_errors=int((osd.pg_stats.deep_scrub_errors - osd_old.pg_stats.deep_scrub_errors) / dtime),
-            shallow_scrub_errors=int((osd.pg_stats.shallow_scrub_errors -
-                                      osd_old.pg_stats.shallow_scrub_errors) / dtime)
-        )
+        osd.d_pg_stats = (osd.pg_stats - osd_old.pg_stats) / dtime
 
     # pg stats
     for pool in ceph.pools.values():
         assert not pool.d_df
         old_pool = ceph_old.pools[pool.name]
-        pool.d_df = PoolDF(
-           size_bytes=int((pool.df.size_bytes - old_pool.df.size_bytes) / dtime),
-           size_kb=int((pool.df.size_kb - old_pool.df.size_kb) / dtime),
-           num_objects=int((pool.df.num_objects - old_pool.df.num_objects) / dtime),
-           num_object_clones=int((pool.df.num_object_clones - old_pool.df.num_object_clones) / dtime),
-           num_object_copies=int((pool.df.num_object_copies - old_pool.df.num_object_copies) / dtime),
-           num_objects_missing_on_primary=int((pool.df.num_objects_missing_on_primary -
-                                               old_pool.df.num_objects_missing_on_primary) / dtime),
-           num_objects_unfound=int((pool.df.num_objects_unfound - old_pool.df.num_objects_unfound) / dtime),
-           num_objects_degraded=int((pool.df.num_objects_degraded - old_pool.df.num_objects_degraded) / dtime),
-           read_ops=int((pool.df.read_ops - old_pool.df.read_ops) / dtime),
-           read_bytes=int((pool.df.read_bytes - old_pool.df.read_bytes) / dtime),
-           write_ops=int((pool.df.write_ops - old_pool.df.write_ops) / dtime),
-           write_bytes=int((pool.df.write_bytes - old_pool.df.write_bytes) / dtime))
+        pool.d_df = (pool.df - old_pool.df) / dtime
 
 
 def parse_netstats(storage: AttredStorage) -> Optional[AggNetStat]:

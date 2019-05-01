@@ -3,15 +3,14 @@ import site
 import time
 import argparse
 import subprocess
-import logging.config
-from typing import List, Any
+from typing import List, Any, cast
 import configparser
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict
 import logging.config
 
+from . import get_file, setup_logging
 from .utils import CLUSTER_NAME_RE, CLIENT_NAME_RE, re_checker
 
 
@@ -30,7 +29,7 @@ class ReporterConfig:
     upload_timeout: int
     inventory: Path
     ceph_master: str
-    storage : Path
+    storage: Path
     log_level: str
     persistent_log: bool
     cluster: str
@@ -75,16 +74,16 @@ def get_config(path: Optional[Path]) -> ReporterConfig:
         ceph_master=cfg['collect']['ceph_master'],
         storage=mkpath(cfg['collect']['storage']),
         log_level=common['log_level'],
-        persistent_log=common['persistent_log'],
+        persistent_log=cfg.getboolean('common', 'persistent_log', fallback=False),
         cluster=cfg['collect']['cluster'],
         customer=cfg['collect']['customer'],
-        url=cfg.get('upload', 'url', fallback=None),
-        http_creds=cfg.get('upload', 'http_creds', fallback=None),
-        prometeus_url=cfg.get('collect', 'prometeus_url', fallback=None),
-        prometheus_interval=cfg.get('collect', 'prometheus_interval', fallback=None),
-        duration=cfg.getint('historic', 'duration', fallback=None),
-        size=cfg.getint('historic', 'size', fallback=None),
-        min_duration=cfg.getint('historic', 'min_duration', fallback=None),
+        url=cfg.get('upload', 'url', fallback=None),  # type: ignore
+        http_creds=cfg.get('upload', 'http_creds', fallback=None),  # type: ignore
+        prometeus_url=cfg.get('collect', 'prometeus_url', fallback=None),  # type: ignore
+        prometheus_interval=cfg.getint('collect', 'prometheus_interval', fallback=None),  # type: ignore
+        duration=cfg.getint('historic', 'duration', fallback=None),  # type: ignore
+        size=cfg.getint('historic', 'size', fallback=None),  # type: ignore
+        min_duration=cfg.getint('historic', 'min_duration', fallback=None),  # type: ignore
     )
 
 
@@ -148,8 +147,13 @@ def unistall_service(svc_name: str, svc_target: Path) -> None:
 
 
 def parse_args(argv: List[str]) -> Any:
-    parser = argparse.ArgumentParser(
-        formatter_class=lambda *args, **kwargs: argparse.ArgumentDefaultsHelpFormatter(*args, **kwargs, width=120))
+
+    class Formatter(argparse.ArgumentDefaultsHelpFormatter):
+        def __init__(self, *args, **kwargs) -> None:
+            kwargs['width'] = 120
+            argparse.ArgumentDefaultsHelpFormatter.__init__(self, *args, **kwargs)
+
+    parser = argparse.ArgumentParser(formatter_class=Formatter)
 
     sub_parsers = parser.add_subparsers(dest='subparser_name')
 
@@ -174,7 +178,7 @@ def parse_args(argv: List[str]) -> Any:
     install_parser = sub_parsers.add_parser("install_service")
     install_parser.add_argument("--dont-start", action='store_true', default=False, help="Don't start service")
     install_parser.add_argument("--dont-enable", action='store_true', default=False,
-                                 help="Don't enable auto start on boot")
+                                help="Don't enable auto start on boot")
 
     sub_parsers.add_parser("uninstall_service")
 
@@ -201,7 +205,10 @@ def main(argv: List[str]) -> int:
 
         logger.info(f"Started with {argv}")
 
-        upload_args = ["--url", cfg.url, "--http-creds", cfg.http_creds]
+        assert cfg.url
+        assert cfg.http_creds
+
+        upload_args: List[str] = ["--url", cfg.url, "--http-creds", cfg.http_creds]  # type: ignore
 
         next_time = time.time()
 
@@ -248,6 +255,7 @@ def main(argv: List[str]) -> int:
     else:
         print(f"Unknown cmd {opts.subparser_name}")
         return 1
+    return 0
 
 
 if __name__ == "__main__":

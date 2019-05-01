@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 import argparse
 import datetime
@@ -55,12 +57,13 @@ class FileInfo(NamedTuple):
     def name(self) -> str:
         body = f"{self.customer}.{self.cluster}.{self.collect_datetime:%Y_%b_%d}.{self.collect_datetime:%H_%M}"
         if self.ftype and self.ftype in encapsulated_types:
+            assert self.ref_ftype
             base_suffix, base_prefix = type_mapping[self.ref_ftype]
             body = f"{'' if base_prefix is None else base_prefix}{body}{base_suffix}"
         suffix, prefix = type_mapping[self.ftype]
         return f"{'' if prefix is None else prefix}{body}{suffix}"
 
-    def copy(self, **update) -> 'FileInfo':
+    def copy(self, **update) -> FileInfo:
         attrs = {name: getattr(self, name) for name in self.__annotations__ if name not in update}
         for name in update:
             assert name in self.__annotations__
@@ -73,8 +76,8 @@ def get_file_type(name: str) -> Tuple[Optional[FileType], Optional[str]]:
         if name.endswith(suffix):
             if tp in encapsulated_types:
                 return tp, name[:-len(suffix)]
-            elif name.startswith(prefix):
-                return tp, name[len(prefix):-len(suffix)]
+            elif not prefix or name.startswith(prefix):
+                return tp, name[len(prefix) if prefix else 0:-len(suffix)]
     else:
         return None, None
 
@@ -85,6 +88,7 @@ def parse_file_name(name: str) -> Optional[FileInfo]:
         return None
 
     if ftype in encapsulated_types:
+        assert rest is not None
         ref_ftype, rest = get_file_type(rest)
         ref_name = rest
         if ref_ftype in encapsulated_types:
@@ -92,6 +96,7 @@ def parse_file_name(name: str) -> Optional[FileInfo]:
     else:
         ref_ftype = ref_name = None
 
+    assert rest is not None
     parts = rest.split(".")
     if len(parts) != 4:
         return None

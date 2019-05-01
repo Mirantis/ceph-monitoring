@@ -10,7 +10,7 @@ import argparse
 import subprocess
 import logging.config
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Callable
 
 import matplotlib
 
@@ -21,7 +21,7 @@ import seaborn
 seaborn.set()
 del seaborn
 
-from koder_utils import make_storage, TypedStorage, table
+from koder_utils import make_storage, TypedStorage, XMLBuilder, AnyXML
 
 from . import setup_logging, get_file
 from .cluster import load_all, fill_usage, fill_cluster_nets_roles
@@ -73,9 +73,9 @@ def make_report(name: str, d1_path: pathlib.Path, d2_path: pathlib.Path = None, 
 
     report = Report(name, "index.html")
 
-    cluster_reporters = [
+    cluster_reporters: List[Callable[..., AnyXML]] = [
         show_cluster_summary,
-        show_issues_table,
+        # show_issues_table,
         show_primary_settings,
         show_pools_info,
         show_pools_lifetime_load,
@@ -85,23 +85,23 @@ def make_report(name: str, d1_path: pathlib.Path, d2_path: pathlib.Path = None, 
         show_hosts_config,
         show_hosts_status,
         show_hosts_pg_info,
-        show_mons_info,
+        # show_mons_info,
         show_osd_state,
         show_osd_info,
         show_osd_proc_info,
         show_osd_proc_info_agg,
         show_osd_perf_info,
         show_pg_state,
-        show_cluster_err_warn_summary,
+        # show_cluster_err_warn_summary,
         show_cluster_err_warn,
         (show_osd_pool_agg_pg_distribution if len(ceph.osds) > 20 else show_osd_pool_pg_distribution),
         show_host_io_load_in_color,
         show_host_network_load_in_color,
         show_whole_cluster_nets,
-        show_osd_used_space_histo,
+        # show_osd_used_space_histo,
         # show_osd_pg_histo,
-        show_pg_size_kde,
-        plot_crush_rules
+        # show_pg_size_kde,
+        # plot_crush_rules
     ]
 
     params = {"ceph": ceph, "cluster": cluster, "report": report, "uptime": not cluster.has_second_report}
@@ -119,12 +119,7 @@ def make_report(name: str, d1_path: pathlib.Path, d2_path: pathlib.Path = None, 
         if new_block:
             assert 'report' not in sig.parameters
             rname = reporter.__name__.replace("show_", "")
-            if isinstance(new_block, table.Table):
-                html_id = reporter.html_id if hasattr(reporter, 'html_id') else None
-                new_block_html = new_block.html(html_id)
-            else:
-                new_block_html = new_block
-            report.add_block(rname, reporter.report_name, new_block_html)
+            report.add_block(rname, reporter.report_name, new_block)  # type: ignore
 
     for _, host in sorted(cluster.hosts.items()):
         report.add_block(host_link(host.name).id, None, host_info(host, ceph))
@@ -151,15 +146,17 @@ def parse_args(argv):
 
 def main(argv: List[str]):
     opts = parse_args(argv)
-    setup_logging(opts.log_level,
+    setup_logging(log_level=opts.log_level,
                   log_config_file=get_file('logging.json'),
                   out_folder=None)
 
     logger.info("Generating report from %r to %r", opts.path, opts.out)
 
     if opts.profile:
-        prof = cProfile.Profile()
+        prof: Optional[cProfile.Profile] = cProfile.Profile()
         prof.enable()
+    else:
+        prof = None
 
     remove_d1, d1_path = prepare_path(pathlib.Path(opts.path))
 
@@ -193,7 +190,7 @@ def main(argv: List[str]):
             assert d2_path
             shutil.rmtree(str(d2_path))
 
-    if opts.profile:
+    if prof:
         prof.disable()  # type: ignore
         s = io.StringIO()
         ps = pstats.Stats(prof, stream=s).sort_stats('time', 'calls')

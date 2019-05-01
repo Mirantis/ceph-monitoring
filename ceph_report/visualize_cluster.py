@@ -3,52 +3,52 @@ import logging
 import datetime
 import collections
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Iterator
 
 import yaml
 
-from koder_utils import (b2ssize_10, b2ssize, Table, Column, seconds_to_str, table_to_html, XMLDocument, fail, ok,
-                         doc_to_string, SimpleTable)
-from cephlib import CephInfo, FileStoreInfo, BlueStoreInfo, MonRole, Pool
+from koder_utils import (b2ssize_10, b2ssize, Table, Column, seconds_to_str, table_to_html, XMLBuilder, fail, ok,
+                         SimpleTable, AnyXML, htag, RawContent)
+from cephlib import CephInfo, FileStoreInfo, BlueStoreInfo, Pool, get_rule_replication_level, get_rule_osd_class
 
 from .cluster import Cluster
-from .visualize_utils import tab, partition_by_len, table_id, table_to_doc
+from .visualize_utils import tab, partition_by_len, table_to_doc
 from .checks import run_all_checks, CheckMessage
 from .report import Report
 from .obj_links import err_link, mon_link, pool_link
 
 
-logger = logging.getLogger("ceph_report")
+logger = logging.getLogger("report")
 
 
 @tab("Status")
-def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> XMLDocument:
+def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> XMLBuilder:
     """
     Cluster short summary
     """
     class SummaryTable(Table):
         setting = Column.s()
-        value = Column.s()
+        value = Column.to_str()
 
     t = SummaryTable()
     t.add_row("Collected at", cluster.report_collected_at_local)
     t.add_row("Collected at GMT", cluster.report_collected_at_gmt)
-    t.add_row("Status", ceph.status.status.name.upper())
-    t.add_row("PG count", ceph.status.num_pgs)
+    t.add_row("Status", ceph.status.health.overall_status.name.upper())
+    t.add_row("PG count", ceph.status.pgmap.num_pgs)
     t.add_row("Pool count", len(ceph.pools))
-    t.add_row("Used", b2ssize(ceph.status.bytes_used))
-    t.add_row("Free space", b2ssize(ceph.status.bytes_avail))
-    t.add_row("Data size", b2ssize(ceph.status.data_bytes))
+    t.add_row("Used", b2ssize(ceph.status.pgmap.bytes_used))
+    t.add_row("Free space", b2ssize(ceph.status.pgmap.bytes_avail))
+    t.add_row("Data size", b2ssize(ceph.status.pgmap.data_bytes))
 
-    avail_perc = ceph.status.bytes_avail * 100 / ceph.status.bytes_total
+    avail_perc = ceph.status.pgmap.bytes_avail * 100 / ceph.status.pgmap.bytes_total
     t.add_row("Free %", int(avail_perc))
     t.add_row("Monitors count", len(ceph.mons))
     t.add_row("OSD's count", len(ceph.osds))
 
-    mon_vers = [mon.version for mon in ceph.mons.values()]
+    mon_vers = {mon.version for mon in ceph.mons.values()}
     t.add_row("Monitor versions", ", ".join(map(str, sorted(mon_vers))))
 
-    osd_vers = [osd.version for osd in ceph.osds.values()]
+    osd_vers = {osd.version for osd in ceph.osds.values()}
     vers = [str(ver) for ver in sorted(ver for ver in osd_vers if ver)]
     if None in osd_vers:
         vers.append("Unknown")
@@ -65,8 +65,8 @@ def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> XMLDocument:
 
     t.add_row("OSD storage types",  stor_types)
 
-    t.add_row("Monmap version", ceph.status.monmap_stat['epoch'])
-    mon_tm = time.mktime(time.strptime(ceph.status.monmap_stat['modified'], "%Y-%m-%d %H:%M:%S.%f"))
+    t.add_row("Monmap version", ceph.status.monmap.epoch)
+    mon_tm = time.mktime(ceph.status.monmap.modified.timetuple())
     collect_tm = time.mktime(time.strptime(cluster.report_collected_at_local, "%Y-%m-%d %H:%M:%S"))
     t.add_row("Monmap modified in", seconds_to_str(int(collect_tm - mon_tm)))
     return table_to_doc(t, id="table-summary", sortable=False)
@@ -87,8 +87,8 @@ def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report):
     err_per_test: Dict[str, List[CheckMessage]] = collections.defaultdict(list)
 
     for result in check_results:
-        t.add_cells(result.check_description, doc_to_string(passed if result.passed else failed),
-                    err_link(result.reporter_id, result.message).link)
+        t.add_row(result.check_description, passed if result.passed else failed,
+                  err_link(result.reporter_id, result.message).link)
         for err in result.fails:
             err_per_test[err.reporter_id].append(err)
 
@@ -106,35 +106,33 @@ def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report):
 
         all_services = set()
         for message, services in err_map.items():
-            table.add_cells("<br>".join(", ".join(items) for items in partition_by_len(services, 80, 1)),
-                            str(len(services)), message)
+            table.add_row("<br>".join(", ".join(items) for items in partition_by_len(services, 80, 1)),
+                          str(len(services)), message)
             all_services.update(services)
 
         if len(err_map) > 1:
-            table.add_cells("Total affected", str(len(all_services)), "")
+            table.add_row("Total affected", str(len(all_services)), "")
 
-        report.add_block(err_link(reporter_id).id, None, str(table))
+        report.add_block(err_link(reporter_id).id, None, table_to_html(table))
     report.issues.update(err_per_test)
 
 
 @tab("Current IO Activity")
-def show_io_status(ceph: CephInfo) -> XMLDocument:
+def show_io_status(ceph: CephInfo) -> XMLBuilder:
     """
     Current cluster IO load
     """
     class IOTable(Table):
         io_type = Column.s("IO type")
-        val = Column.ei()
+        val = Column.s()
 
     t = IOTable()
-    t.add_row("Client IO Write MiBps", b2ssize(ceph.status.write_bytes_sec // 2 ** 20))
-    t.add_row("Client IO Write OPS", b2ssize(ceph.status.write_op_per_sec))
-    t.add_row("Client IO Read MiBps", b2ssize(ceph.status.read_bytes_sec // 2 ** 20))
-    t.add_row("Client IO Read OPS", b2ssize(ceph.status.read_op_per_sec))
-    if "recovering_bytes_per_sec" in ceph.status.pgmap_stat:
-        t.add_row("Recovery IO MiBps", b2ssize(ceph.status.pgmap_stat["recovering_bytes_per_sec"]))
-    if "recovering_objects_per_sec" in ceph.status.pgmap_stat:
-        t.add_row("Recovery conn per second", b2ssize_10(ceph.status.pgmap_stat["recovering_objects_per_sec"]))
+    t.add_row("Client IO Write MiBps", b2ssize(ceph.status.pgmap.write_bytes_sec // 2 ** 20))
+    t.add_row("Client IO Write OPS", b2ssize_10(ceph.status.pgmap.write_op_per_sec))
+    t.add_row("Client IO Read MiBps", b2ssize(ceph.status.pgmap.read_bytes_per_sec // 2 ** 20))
+    t.add_row("Client IO Read OPS", b2ssize_10(ceph.status.pgmap.read_op_per_sec))
+    t.add_row("Recovery IO MiBps", b2ssize(ceph.status.pgmap.recovering_bytes_per_sec // 2 ** 20))
+    t.add_row("Recovery obj per second", b2ssize_10(ceph.status.pgmap.recovering_objects_per_sec))
 
     return table_to_doc(t, id="table-io-summary", sortable=False)
 
@@ -144,12 +142,11 @@ class MonitorInfoTable(Table):
     health = Column.s(help="Monitor health")
     role = Column.s(help="Monitor role")
     free = Column.s("Disk free<br>B (%)", help="Free space on used disk")
-    db_size = Column.i("DB size", help="Monitor database size")
+    db_size = Column.d("DB size", help="Monitor database size")
 
 
 @tab("Monitors info")
-@table_id("table-mon-info")
-def show_mons_info(ceph: CephInfo) -> XMLDocument:
+def show_mons_info(ceph: CephInfo) -> XMLBuilder:
     """
     Monitors info
     {MonitorInfoTable.help()}
@@ -160,17 +157,18 @@ def show_mons_info(ceph: CephInfo) -> XMLDocument:
     for _, mon in sorted(ceph.mons.items()):
         role = "Unknown"
         health = fail("HEALTH_FAIL")
-        if mon.status is None:
-            for mon_info in ceph.status.monmap_stat['mons']:
-                if mon_info['name'] == mon.name:
-                    if mon_info.get('rank') in [0, 1, 2, 3, 4]:
-                        health = ok("HEALTH_OK")
-                        role = "leader" if mon_info.get('rank') == 0 else "follower"
-                        break
-        else:
-            health = ok("HEALTH_OK") if mon.status == "HEALTH_OK" else fail(mon.status)
-            role = "leader" if mon.role == MonRole.master else \
-                ("follower" if mon.role == MonRole.master else "Unknown")
+
+        # if mon.role is MonRole.unknown:
+        #     for mon_info in ceph.status.monmap_stat['mons']:
+        #         if mon_info['name'] == mon.name:
+        #             if mon_info.get('rank') in [0, 1, 2, 3, 4]:
+        #                 health = ok("HEALTH_OK")
+        #                 role = "leader" if mon_info.get('rank') == 0 else "follower"
+        #                 break
+        # else:
+        #     health = ok("HEALTH_OK") if mon.name in ceph.status.quorum_names else fail(mon.status)
+        #     role = "leader" if mon.role == MonRole.master else \
+        #         ("follower" if mon.role == MonRole.master else "Unknown")
 
         if mon.kb_avail is None:
             perc = "Unknown"
@@ -190,29 +188,27 @@ def show_mons_info(ceph: CephInfo) -> XMLDocument:
 
 
 @tab("Settings")
-def show_primary_settings(ceph: CephInfo) -> XMLDocument:
+def show_primary_settings(ceph: CephInfo) -> XMLBuilder:
     """
     Most important cluster settings
     """
     table = SimpleTable("Name", "Value")
 
-    table.add_cell("<b>Common</b>", colspan=2)
-    table.next_row()
-
-    table.add_cells("Cluster net", str(ceph.cluster_net))
-    table.add_cells("Public net", str(ceph.public_net))
-    table.add_cells("Near full ratio", "%0.3f" % (float(ceph.settings.mon_osd_nearfull_ratio,)))
+    table.add_cell(~htag.b("Common"), colspan=2)
+    table.add_row("Cluster net", str(ceph.cluster_net))
+    table.add_row("Public net", str(ceph.public_net))
+    table.add_row("Near full ratio", f"{float(ceph.settings.mon_osd_nearfull_ratio):.3f}")
 
     if 'mon_osd_backfillfull_ratio' in ceph.settings:
-        bfratio = f"{float(ceph.settings['mon_osd_backfillfull_ratio']):.3f}"
+        bfratio = f"{float(ceph.settings.mon_osd_backfillfull_ratio):.3f}"
     elif 'osd_backfill_full_ratio' in ceph.settings:
-        bfratio = f"{float(ceph.settings['osd_backfill_full_ratio']):.3f}"
+        bfratio = f"{float(ceph.settings.osd_backfill_full_ratio):.3f}"
     else:
         bfratio = '?'
 
-    table.add_cells("Backfill full ratio", bfratio)
-    table.add_cells("Full ratio", "%0.3f" % (float(ceph.settings.mon_osd_full_ratio,)))
-    table.add_cells("Filesafe full ratio", "%0.3f" % (float(ceph.settings.osd_failsafe_full_ratio,)))
+    table.add_row("Backfill full ratio", bfratio)
+    table.add_row("Full ratio", f"{float(ceph.settings.mon_osd_full_ratio):.3f}")
+    table.add_row("Filesafe full ratio", f"{float(ceph.settings.osd_failsafe_full_ratio):.3f}")
 
     def show_opt(name: str, tr_func: Callable[[str], str] = None):
         name_under = name.replace(" ", "_")
@@ -220,10 +216,9 @@ def show_primary_settings(ceph: CephInfo) -> XMLDocument:
             vl = ceph.settings[name_under]
             if tr_func is not None:
                 vl = tr_func(vl)
-            table.add_cells(name.capitalize(), vl)
+            table.add_row(name.capitalize(), vl)
 
-    table.add_cell("<b>Fail detection</b>", colspan=2)
-    table.next_row()
+    table.add_cell(~htag.b("Fail detection"), colspan=2)
 
     show_opt("mon osd down out interval", lambda x: seconds_to_str(int(x)))
     show_opt("mon osd adjust down out interval")
@@ -234,13 +229,11 @@ def show_primary_settings(ceph: CephInfo) -> XMLDocument:
     show_opt("osd heartbeat grace", lambda x: seconds_to_str(int(x)))
 
     table.add_cell("<b>Other</b>", colspan=2)
-    table.next_row()
 
     show_opt("osd max object size", lambda x: b2ssize(int(x)) + "B")
     show_opt("osd mount options xfs")
 
     table.add_cell("<b>Scrub</b>", colspan=2)
-    table.next_row()
 
     show_opt("osd max scrubs")
     show_opt("osd scrub begin hour")
@@ -253,8 +246,7 @@ def show_primary_settings(ceph: CephInfo) -> XMLDocument:
     show_opt("osd deep scrub interval", lambda x: seconds_to_str(int(float(x))))
     show_opt("osd deep scrub stride", lambda x: b2ssize(int(x)) + "B")
 
-    table.add_cell("<b>OSD io</b>", colspan=2)
-    table.next_row()
+    table.add_cell(~htag.b("OSD io"), colspan=2)
 
     show_opt("osd op queue")
     show_opt("osd client op priority")
@@ -277,8 +269,7 @@ def show_primary_settings(ceph: CephInfo) -> XMLDocument:
     show_opt("osd recovery thread timeout")
 
     if ceph.has_bs:
-        table.add_cell("<b>Bluestore</b>", colspan=2)
-        table.next_row()
+        table.add_cell(~htag.b("Bluestore"), colspan=2)
 
         show_opt("bluestore cache size hdd", lambda x: b2ssize(int(x)) + "B")
         show_opt("bluestore cache size ssd", lambda x: b2ssize(int(x)) + "B")
@@ -288,36 +279,35 @@ def show_primary_settings(ceph: CephInfo) -> XMLDocument:
         show_opt("bluestore csum type")
 
     if ceph.has_fs:
-        table.add_cell("<b>Filestore</b>", colspan=2)
-        table.next_row()
-        table.add_cells("Journal aio", ceph.settings.journal_aio)
-        table.add_cells("Journal dio", ceph.settings.journal_dio)
-        table.add_cells("Filestorage sync", str(int(float(ceph.settings.filestore_max_sync_interval))) + 's')
+        table.add_cell(~htag.b("Filestore"), colspan=2)
+        table.add_row("Journal aio", ceph.settings.journal_aio)
+        table.add_row("Journal dio", ceph.settings.journal_dio)
+        table.add_row("Filestorage sync", str(int(float(ceph.settings.filestore_max_sync_interval))) + 's')
 
     return table_to_doc(table, id="table-settings")
 
 
 class RulesetsTable(Table):
     rule = Column.s(help="Rule name")
-    id = Column.ei(help="Rule id")
+    id = Column.ed(help="Rule id")
     pools = Column.list(help="Pools, this rule is used for")
     osd_class = Column.s(help='OSD class used int his rule')
     replication_level = Column.s("Replication<br>level", help='Level on which this rule doing replication')
     pg = Column.s("PG", help='Total PG count, managed by this rule')
-    pg_per_osd = Column.ei("PG copy/OSD", help='Average PG copy per OSD for this rule')
-    num_osd = Column.ei("# OSD", help="OSD count, this rule put data to")
+    pg_per_osd = Column.ed("PG copy/OSD", help='Average PG copy per OSD for this rule')
+    num_osd = Column.ed("# OSD", help="OSD count, this rule put data to")
     total_size = Column.sz(help="Total space osd all OSD's used by this rule")
     free_size = Column.s(help="Free space on OSD's, managed by this rule (not counting replication)")
-    data = Column.s("Data size<br>TiB", help="User data size, managed by this rule (without replication)")
+    data = Column.s("Data size<br>TiB",
+                    help="User data size, managed by this rule (without replication)")
     objs = Column.s("Total<br>Kobjects", help="Object count managed by this rule")
     data_disk_sizes = Column.s(help="Disk sizes, used to store data for this rule on OSD's")
     disk_types = Column.list(delim='<br>', help="Disk types, used to store data for this rule on OSD's")
     data_disk_models = Column.list(help="Disk models, used to store data for this rule on OSD's")
 
 
-@table_id("table-rules")
 @tab("Crush rulesets")
-def show_ruleset_info(ceph: CephInfo) -> XMLDocument:
+def show_ruleset_info(ceph: CephInfo) -> XMLBuilder:
     f"""
     Crush ruleset info
     """
@@ -333,42 +323,43 @@ def show_ruleset_info(ceph: CephInfo) -> XMLDocument:
     cluster_objects = sum(pool.df.num_objects for pool in ceph.pools.values())
 
     for rule in ceph.crush.crushmap.rules:
-        if rule.id not in ceph.osds4rule:
-            logger.warning("Skipping visualization of rule %s, as it hs no osd in it", rule.name)
+        if rule.rule_id not in ceph.osds4rule:
+            logger.warning("Skipping visualization of rule %s, as it hs no osd in it", rule.rule_name)
             continue
 
         row = table.next_row()
-        row.rule = rule.name
-        row.id = rule.id
-        row.pools = [pool_link(pool.name).link for pool in pools.get(rule.id, [])]
+        row.rule = rule.rule_name
+        row.id = rule.rule_id
+        row.pools = [pool_link(pool.name).link for pool in pools.get(rule.rule_id, [])]
 
         if ceph.is_luminous:
-            row.osd_class = '*' if rule.class_name is None else rule.class_name
+            class_name = get_rule_osd_class(rule)
+            row.osd_class = '*' if class_name is None else class_name
 
-        row.replication_level = rule.replicated_on
-        osds = ceph.osds4rule[rule.id]
+        row.replication_level = get_rule_replication_level(rule)
+        osds = ceph.osds4rule[rule.rule_id]
         row.num_osd = len(osds)
-        total_sz = sum(osd.space.free_space + osd.space.used_space for osd in osds)
+        total_sz = sum(osd.space.free + osd.space.used for osd in osds)
         row.total_size = total_sz
-        total_free = sum(osd.space.free_space for osd in osds)
+        total_free = sum(osd.space.free for osd in osds)
         row.free_size = f"{b2ssize(total_free)} ({total_free * 100 // total_sz}%)", total_free
 
         if cluster_bytes:
-            total_data = sum(pool.df.size_bytes for pool in pools.get(rule.id, []))
+            total_data = sum(pool.df.size_bytes for pool in pools.get(rule.rule_id, []))
             row.data = f"{total_data // 2 ** 40} ({total_data * 100 // cluster_bytes}%)"
         else:
             row.data = '-'
 
         if cluster_objects:
-            total_objs = sum(pool.df.num_objects for pool in pools.get(rule.id, []))
+            total_objs = sum(pool.df.num_objects for pool in pools.get(rule.rule_id, []))
             row.objs = f"{total_objs // 10 ** 3} ({total_objs * 100 // cluster_objects}%)"
         else:
             row.objs = '-'
 
-        total_pg = sum(pool.pg for pool in pools.get(rule.id, []))
+        total_pg = sum(pool.pg for pool in pools.get(rule.rule_id, []))
         row.pg = f"{total_pg} ({total_pg * 100 // cluster_pg}%)", total_pg
 
-        total_pg_copy = sum(pool.pg * pool.size for pool in pools.get(rule.id, []))
+        total_pg_copy = sum(pool.pg * pool.size for pool in pools.get(rule.rule_id, []))
         row.pg_per_osd = total_pg_copy // len(osds)
 
         storage_disks_types = set()
@@ -394,12 +385,17 @@ def show_ruleset_info(ceph: CephInfo) -> XMLDocument:
         row.disk_types = ["data: " + ", ".join(storage_disks_types), "wal/db/j: " + ", ".join(journal_disks_types)]
         row.data_disk_models = sorted(disks_info)
 
-    return table_to_doc(table)
+    return table_to_doc(table, id="table-rules")
 
 
 @tab("Cluster err/warn")
-def show_cluster_err_warn(ceph: CephInfo) -> str:
-    return "<br>".join(ceph.log_err_warn)
+def show_cluster_err_warn(ceph: CephInfo) -> XMLBuilder:
+    doc = XMLBuilder()
+    with doc.div:
+        for err in ceph.log_err_warn:
+            doc(err)
+            doc.br()
+    return doc
 
 
 class NetsTable(Table):
@@ -410,24 +406,24 @@ class NetsTable(Table):
                   help="Interfaces speed settings in Gbps (10**9 bits per second)")
     data_transferred = Column.sz("Bytes<br>transferred",
                                  help="Total bytes transferred (send+recv) on all adapters between reports")
-    pps_transferred = Column.i("Packets<br>transferred",
+    pps_transferred = Column.d("Packets<br>transferred",
                                help="Total packets transferred (send+recv) on all adapters between reports")
-    multicast = Column.i("Multicast<br>packets",
+    multicast = Column.d("Multicast<br>packets",
                          help="Total count of multicast packages received on all adapters between reports")
-    total_err = Column.i("Wire<br>errors",
+    total_err = Column.d("Wire<br>errors",
                          help="Total count if transmit errors between reports during all nodes uptime")
     data_transferred_uptime = Column.sz("Bytes<br>transferred<br>uptime",
                                         help="Bytes transferred during all nodes uptime")
-    pps_transferred_uptime = Column.i("Packets<br>transferred<br>uptime",
+    pps_transferred_uptime = Column.d("Packets<br>transferred<br>uptime",
                                       help="Total packets transferred (send+recv) on all " +
                                            "adapters  during all nodes uptime")
-    multicast_uptime = Column.i("Multicast<br>packets<br>uptime",
+    multicast_uptime = Column.d("Multicast<br>packets<br>uptime",
                                 help="Total multicast packages received on all adapters during all nodes uptime")
-    total_err_uptime = Column.i("Errors<br>uptime", help="Total error on all adapters during all nodes uptime")
+    total_err_uptime = Column.d("Errors<br>uptime", help="Total error on all adapters during all nodes uptime")
 
 
 @tab("Whole cluster net")
-def show_whole_cluster_nets(cluster: Cluster) -> XMLDocument:
+def show_whole_cluster_nets(cluster: Cluster) -> XMLBuilder:
     f"""
     Cluster networks summary
     """
@@ -461,31 +457,30 @@ def show_whole_cluster_nets(cluster: Cluster) -> XMLDocument:
 
 class IssuesTable(Table):
     type = Column.s(help="Error short name")
-    count = Column.ei(help="Error count of this type")
+    count = Column.ed(help="Error count of this type")
 
 
 @tab("Errors summary")
-def show_cluster_err_warn_summary(ceph: CephInfo) -> Optional[str]:
+def show_cluster_err_warn_summary(ceph: CephInfo) -> Iterator[AnyXML]:
     f"""
     Cluster logs errors/warnings summary and cluster health timeline
     """
 
-    if not ceph.errors_count:
-        return None
+    if ceph.errors_count:
+        table = IssuesTable()
 
-    table = IssuesTable()
+        for name, cnt in sorted(ceph.errors_count.items(), key=lambda x: x[1]):
+            table.add_row(name, cnt)
 
-    for name, cnt in sorted(ceph.errors_count.items(), key=lambda x: x[1]):
-        table.add_row(name, cnt)
-
-    res = doc_to_string(table_to_doc(table, id="table-errors-summary"))
-    health_svg = plot_healthnes(ceph)
-    if health_svg:
-        return f"{res}<br><br><br>{health_svg}"
-    return res
+        res = table_to_doc(table, id="table-errors-summary")
+        health_svg = plot_healthnes(ceph)
+        if health_svg:
+            yield RawContent(f"{res}<br><br><br>{health_svg}")
+        else:
+            yield res
 
 
-def plot_healthnes(ceph: CephInfo, width: int = 1400, height: int = 30) -> Optional[str]:
+def plot_healthnes(ceph: CephInfo, width: int = 1400, height: int = 30) -> Optional[AnyXML]:
     if not ceph.status_regions:
         return None
 
@@ -497,20 +492,19 @@ def plot_healthnes(ceph: CephInfo, width: int = 1400, height: int = 30) -> Optio
 
     total_len = end - begin
 
-    doc = XMLDocument('div')
-
     begin_s = datetime.datetime.utcfromtimestamp(begin).strftime('%Y-%m-%d %H:%M:%S')
     end_s = datetime.datetime.utcfromtimestamp(end).strftime('%Y-%m-%d %H:%M:%S')
 
+    doc = XMLBuilder()
     doc.center.H4(f"Health status over time. Begin at {begin_s}, ends at {end_s}")
-    doc.br
-    doc.br
-    with doc.svg(width=width, height=height):
+    doc.br()
+    doc.br()
+    with doc.svg(width=str(width), height=str(height)):
         curr_x: float = 0
         for region in ceph.status_regions:
             color = "#6282EA" if region.healty else "#DD5F4B"
             end_x = width * (region.end - begin) / total_len
-            doc.rect(x=curr_x, y=0, width=end_x - curr_x, height=height, style=f"fill:{color}")
+            doc.rect(x=str(curr_x), y="0", width=str(end_x - curr_x), height=str(height), style=f"fill:{color}")
             curr_x = end_x
 
-    return doc_to_string(doc)
+    return doc

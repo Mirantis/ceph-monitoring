@@ -1,11 +1,13 @@
-import collections
 import logging
+import collections
 from enum import Enum
-from typing import List, Dict, Callable, Any, Optional, Tuple
 from dataclasses import dataclass
+from typing import List, Dict, Callable, Any, Optional, Tuple
 
-from .cluster_classes import Cluster, CephInfo, FileStoreInfo, BlueStoreInfo, DiskType
-from cephlib.units import b2ssize
+from koder_utils import b2ssize, DiskType
+from cephlib import FileStoreInfo, BlueStoreInfo, CephInfo
+
+from . import Cluster
 
 # Check
 # mount options
@@ -144,7 +146,7 @@ def checker(severity: Severity, description: str, *readmeurls: str) -> Callable[
 
 
 @checker(Severity.warning, "Scrub errors count")
-def no_scrub_errors(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+def no_scrub_errors(config: CheckConfig, _: Cluster, ceph: CephInfo, report: CheckReport):
     total_scrub_err = 0
     err_per_osd: Dict[int, int] = {}
     for osd in ceph.sorted_osds:
@@ -161,7 +163,7 @@ def no_scrub_errors(config: CheckConfig, cluster: Cluster, ceph: CephInfo, repor
 
 
 @checker(Severity.warning, "SSD/NVME used for journals/wal/db")
-def ssd_nvme_journals(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+def ssd_nvme_journals(config: CheckConfig, _: Cluster, ceph: CephInfo, report: CheckReport):
     count = 0
     for osd in ceph.sorted_osds:
         if osd.storage_info is None:
@@ -171,9 +173,8 @@ def ssd_nvme_journals(config: CheckConfig, cluster: Cluster, ceph: CephInfo, rep
             j_classes = config.get('classes_for_j', ["sata_ssd", "sas-ssd", "nvme"])
             j_disk_type = osd.storage_info.journal.dev_info.tp.name
             if j_disk_type not in j_classes:
-                report.add_extra_message(Severity.warning,
-                    f"uses wrong disk type {j_disk_type} for journal. One of {j_classes} required",
-                    osd_t(osd.id))
+                msg = f"uses wrong disk type {j_disk_type} for journal. One of {j_classes} required"
+                report.add_extra_message(Severity.warning, msg, osd_t(osd.id))
                 count += 1
         else:
             assert isinstance(osd.storage_info, BlueStoreInfo)
@@ -181,16 +182,14 @@ def ssd_nvme_journals(config: CheckConfig, cluster: Cluster, ceph: CephInfo, rep
             wal_classes = config.get('classes_for_wal', ["sata_ssd", "sas-ssd", "nvme"])
             wal_disk_type = osd.storage_info.wal.dev_info.tp.name
             if wal_disk_type not in wal_classes:
-                report.add_extra_message(Severity.warning,
-                    f"uses wrong disk type {wal_disk_type} for wal. One of {wal_classes} required",
-                    osd_t(osd.id))
+                msg = f"uses wrong disk type {wal_disk_type} for wal. One of {wal_classes} required"
+                report.add_extra_message(Severity.warning, msg, osd_t(osd.id))
 
             db_classes = config.get('classes_for_db', ["sata_ssd", "sas-ssd", "nvme"])
             db_disk_type = osd.storage_info.db.dev_info.tp.name
             if db_disk_type not in db_classes:
-                report.add_extra_message(Severity.warning,
-                    f"uses wrong disk type {db_disk_type} for db. One of {db_classes} required",
-                    osd_t(osd.id))
+                msg = f"uses wrong disk type {db_disk_type} for db. One of {db_classes} required"
+                report.add_extra_message(Severity.warning, msg, osd_t(osd.id))
 
             if db_disk_type not in db_classes or wal_disk_type not in wal_classes:
                 count += 1
@@ -199,7 +198,7 @@ def ssd_nvme_journals(config: CheckConfig, cluster: Cluster, ceph: CephInfo, rep
 
 
 @checker(Severity.warning, "Separated client/cluster ceph networks")
-def separated_ceph_nets(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+def separated_ceph_nets(config: CheckConfig, _: Cluster, ceph: CephInfo, report: CheckReport):
     if config.get('separated_nets', True):
         if ceph.cluster_net == ceph.public_net:
             msg = f"Same net {ceph.public_net} is used for both ceph cluster and public"
@@ -213,18 +212,16 @@ def separated_ceph_nets(config: CheckConfig, cluster: Cluster, ceph: CephInfo, r
 def max_journal_per_device(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
     host_dev_j_count: Dict[str, int] = collections.Counter()
 
-    duuid = lambda node, dev_name: f"{node.name}::{dev_name}"
-
     for osd in ceph.sorted_osds:
         if osd.storage_info is None:
             continue
         if isinstance(osd.storage_info, FileStoreInfo):
-            host_dev_j_count[duuid(osd.host, osd.storage_info.journal.name)] += 1
+            host_dev_j_count[f"{osd.host}::{osd.storage_info.journal.name}"] += 1
         else:
             assert isinstance(osd.storage_info, BlueStoreInfo)
-            host_dev_j_count[duuid(osd.host, osd.storage_info.wal.name)] += 1
+            host_dev_j_count[f"{osd.host}::{osd.storage_info.wal.name}"] += 1
             if osd.storage_info.db.name != osd.storage_info.wal.name:
-                host_dev_j_count[duuid(osd.host, osd.storage_info.db.name)] += 1
+                host_dev_j_count[f"{osd.host}::{osd.storage_info.db.name}"] += 1
 
     fcount = 0
 
@@ -240,20 +237,19 @@ def max_journal_per_device(config: CheckConfig, cluster: Cluster, ceph: CephInfo
 
     for host in cluster.hosts.values():
         for disk in host.disks.values():
-            count = host_dev_j_count[duuid(host, disk.name)]
+            count = host_dev_j_count[f"{host}::{disk.name}"]
             max_journals = config.get('max_journals_per_class', {}).get(disk.tp.name, defaults[disk.tp.name])
 
             if count > max_journals:
                 fcount += 1
-                report.add_extra_message(Severity.warning,
-                    f"Device {disk.name} has {count} journals, max {max_journals} recommended",
-                    host_t(host.name))
+                msg = f"Device {disk.name} has {count} journals, max {max_journals} recommended"
+                report.add_extra_message(Severity.warning, msg, host_t(host.name))
 
     report.add_result(fcount == 0, "" if fcount == 0 else f"{fcount} devices have too many journals")
 
 
 @checker(Severity.warning, "PG for OSD mast be in configured range")
-def pg_per_osd_count(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+def pg_per_osd_count(config: CheckConfig, _: Cluster, ceph: CephInfo, report: CheckReport):
     min_pg = config.get("min_pg_per_osd", 100)
     max_pg = config.get("max_pg_per_osd", 400)
 
@@ -270,16 +266,15 @@ def pg_per_osd_count(config: CheckConfig, cluster: Cluster, ceph: CephInfo, repo
                 range_upper = min_pg - (min_pg - osd.pg_count) // 20 * 20
                 range_lower = max(range_upper - 20, 0)
 
-            report.add_extra_message(Severity.warning,
-                f"wrong PG count in range [{range_lower}, {range_upper}). " + \
-                f"Recommended to be in range [{min_pg}, {max_pg}]",
-                osd_t(osd.id))
+            msg = f"wrong PG count in range [{range_lower}, {range_upper}). " + \
+                f"Recommended to be in range [{min_pg}, {max_pg}]"
+            report.add_extra_message(Severity.warning, msg, osd_t(osd.id))
 
     report.add_result(wrong_pg_count == 0, "" if wrong_pg_count == 0 else f"{wrong_pg_count} osd's has wrong PG count")
 
 
 @checker(Severity.warning, "Pool size/min_size")
-def pool_size_minsize(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+def pool_size_minsize(config: CheckConfig, _: Cluster, ceph: CephInfo, report: CheckReport):
     pool_size = tuple(map(int, config.get('pool_size', "3/2").split("/")))
     gnocci_pool_size = tuple(map(int, config.get('gnocci_pool_size', "2/1").split("/")))
 
@@ -289,14 +284,14 @@ def pool_size_minsize(config: CheckConfig, cluster: Cluster, ceph: CephInfo, rep
         if (pool.size, pool.min_size) != expected_size:
             wrong_size += 1
             report.add_extra_message(Severity.warning,
-                f"Pool {pool.name} size={pool.size}, min_size={pool.min_size}, " +
-                f"must be {expected_size[0]}/{expected_size[1]} respectivelly")
+                                     f"Pool {pool.name} size={pool.size}, min_size={pool.min_size}, " +
+                                     f"must be {expected_size[0]}/{expected_size[1]} respectivelly")
 
     report.add_result(wrong_size == 0, "" if wrong_size == 0 else f"{wrong_size} pools has wrong sizes")
 
 
 @checker(Severity.warning, "Pool pg must be equals to pgp")
-def pg_eq_pgp(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+def pg_eq_pgp(config: CheckConfig, _: Cluster, ceph: CephInfo, report: CheckReport):
     if not config.get('pg_eq_pgp', True):
         return
 
@@ -310,7 +305,7 @@ def pg_eq_pgp(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: Che
 
 
 @checker(Severity.warning, "Small pools should not have lots PG")
-def pg_in_empty_pools(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+def pg_in_empty_pools(config: CheckConfig, _: Cluster, ceph: CephInfo, report: CheckReport):
     sett = config.get("almost_empty_pool", {})
     min_cluster_data = sett.get("min_total_GiB", 100) * 1024 ** 3
     if ceph.status.data_bytes < min_cluster_data:
@@ -329,18 +324,17 @@ def pg_in_empty_pools(config: CheckConfig, cluster: Cluster, ceph: CephInfo, rep
         if pool.pg > max_pg_for_empty_pool:
             if pool.df.size_bytes * pool.size < max_bytes and pool.df.num_object_copies < max_objs:
                 too_many_pg = True
-                report.add_extra_message(Severity.warning, f"very small " +
-                    f"(total_data={pool.df.size_bytes * pool.size}, total_obj_copies={pool.df.num_object_copies}, " +
-                    f"less then {data_part} from total) but has to many PG:" +
-                    f" {pool.pg} > {max_pg_for_empty_pool}",
-                    pool_t(pool.name))
+                msg = f"very small "
+                msg += f"(total_data={pool.df.size_bytes * pool.size}, total_obj_copies={pool.df.num_object_copies}, "
+                msg += f"less then {data_part} from total) but has to many PG: {pool.pg} > {max_pg_for_empty_pool}"
+                report.add_extra_message(Severity.warning, msg, pool_t(pool.name))
                 failed_pools.append(name)
 
     report.add_result(not too_many_pg, f"Pools {', '.join(failed_pools)} has too many pg" if too_many_pg else "")
 
 
 @checker(Severity.warning, "Large pools should have PG corresponding to their size")
-def large_pools_pg(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+def large_pools_pg(config: CheckConfig, _: Cluster, ceph: CephInfo, report: CheckReport):
     sett = config.get("large_pools", {})
     min_cluster_data = sett.get("min_total_GiB", 100) * 1024 ** 3
 
@@ -363,20 +357,20 @@ def large_pools_pg(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report
             if sm_data * min_size_diff < lg_data and sm_pg > lg_pg:
                 pg_count_messed = True
                 report.add_extra_message(Severity.warning,
-                    f"Has substantially less data then {lg_name} ({min_size_diff:.1f})" +
-                    f" but more PG {sm_pg} > {lg_pg}", pool_t(sm_name))
+                                         f"Has substantially less data then {lg_name} ({min_size_diff:.1f})" +
+                                         f" but more PG {sm_pg} > {lg_pg}", pool_t(sm_name))
                 smaller_pools.append(sm_name)
     report.add_result(not pg_count_messed,
                       f"Smaller pools({', '.join(smaller_pools)}) has more PG" if pg_count_messed else "")
 
 
 @checker(Severity.warning, "All crush roots on replication level has >= 3 nodes, and same size in case if 3")
-def replication_level_same_size(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+def replication_level_same_size(config: CheckConfig, _: Cluster, ceph: CephInfo, report: CheckReport):
     if not config.get('replication_level_same_size', True):
         return
 
     passed = True
-    for root in ceph.crush.roots:
+    for root in ceph.crush.crushmap.roots:
         childs = root.childs
         if len(childs) == 3:
             if abs(childs[0].weight - childs[1].weight) > 1 or abs(childs[2].weight - childs[1].weight) > 1:
@@ -389,7 +383,7 @@ def replication_level_same_size(config: CheckConfig, cluster: Cluster, ceph: Cep
 
 
 @checker(Severity.warning, "All OSD's under the same root has same storage types and almost the same size")
-def all_osds_in_root_the_same(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+def all_osds_in_root_the_same(config: CheckConfig, _: Cluster, ceph: CephInfo, report: CheckReport):
 
     sett = config.get("osd_under_same_root", {})
     max_size_diff = sett.get("max_size_diff", 0.01)
@@ -398,44 +392,46 @@ def all_osds_in_root_the_same(config: CheckConfig, cluster: Cluster, ceph: CephI
     failed_size = False
     failed_type = False
 
-    for rule in ceph.crush.rules.values():
-        osds = list(ceph.crush.iter_osds_for_rule(rule.id))
+    for rule in ceph.crush.crushmap.rules:
+        osds_with_w = list(ceph.crush.iter_osds_for_rule(rule))
 
         sizes: Dict[int, int] = collections.Counter()
         types: Dict[DiskType, int] = collections.Counter()
 
-        for osd_node in osds:
-            osd = ceph.osds[osd_node.id]
+        for osd_id, _ in osds_with_w:
+            osd = ceph.osds[osd_id]
             if osd.storage_info:
                 sizes[osd.storage_info.data.partition_info.size] += 1
                 types[osd.storage_info.data.dev_info.tp] += 1
 
         if len(sizes) == 0:
-            logging.warning("Crush rule %s has no osd in it", rule.name)
+            logging.warning("Crush rule %s has no osd in it", rule.rule_name)
             continue
 
         most_often_size = sorted((count, sz) for sz, count in sizes.items())[0][1]
         most_often_type = sorted((count, tp) for tp, count in types.items())[0][1]
 
-        for osd_node in osds:
-            osd = ceph.osds[osd_node.id]
+        for osd_id, _ in osds_with_w:
+            osd = ceph.osds[osd_id]
             if osd.storage_info:
                 sz = osd.storage_info.data.partition_info.size
 
                 if abs(sz - most_often_size) / max([sz, most_often_size, 1]) > max_size_diff:
                     report.add_extra_message(Severity.warning,
-                        f"size {b2ssize(sz)} different " +
-                        f"from most often one {b2ssize(most_often_size)} for root {rule.name}",
-                        osd_t(osd.id))
+                                             f"size {b2ssize(sz)} different " +
+                                             f"from most often one {b2ssize(most_often_size)} " +
+                                             f"for root {rule.rule_name}",
+                                             osd_t(osd.id))
                     failed_size = True
 
                 if all_eq_types:
                     tp = osd.storage_info.data.dev_info.tp
                     if tp != most_often_type:
                         report.add_extra_message(Severity.warning,
-                            f"disk type {tp.name} different " +
-                            f"from most often one {most_often_type.name} for root {rule.name}",
-                            osd_t(osd.id))
+                                                 f"disk type {tp.name} different " +
+                                                 f"from most often one {most_often_type.name} " +
+                                                 f"for root {rule.rule_name}",
+                                                 osd_t(osd.id))
                         failed_type = True
 
     if all_eq_types:
@@ -445,33 +441,33 @@ def all_osds_in_root_the_same(config: CheckConfig, cluster: Cluster, ceph: CephI
 
 
 @checker(Severity.warning, "OSD's with same size have close usage")
-def osd_of_same_size_has_close_data_size(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+def osd_of_same_size_has_close_data_size(config: CheckConfig, _: Cluster, ceph: CephInfo, report: CheckReport):
     data_per_osd: Dict[int, List[float]] = collections.defaultdict(list)
     for osd in ceph.osds.values():
-        total_space = osd.used_space + osd.free_space
+        total_space = osd.space.used + osd.space.free
         if total_space != 0:
-            data_per_osd[total_space].append(osd.free_space / total_space)
+            data_per_osd[total_space].append(osd.space.free / total_space)
 
     failed = False
     max_used_space_diff = config.get("max_used_space_diff", 0.2)
     for sz, free in data_per_osd.items():
         if abs(max(free) - min(free)) > max_used_space_diff:
             report.add_extra_message(Severity.warning,
-                f"Min usage for osd's of size {b2ssize(sz)} is {min(free):.2f}, max is {min(free):.2f}, " +
-                f"which is greater then allowed {max_used_space_diff}")
+                                     f"Min usage for osd's of size {b2ssize(sz)} is {min(free):.2f}, " +
+                                     f"max is {min(free):.2f}, which is greater then allowed {max_used_space_diff}")
             failed = True
 
     report.add_result(not failed, "Too large dispersion in usage of osd's with same sizes" if failed else "")
 
 
 @checker(Severity.warning, "OSD of the same type load evenly distributed")
-def osd_of_same_size_has_close_load(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+def osd_of_same_size_has_close_load(config: CheckConfig, _: Cluster, ceph: CephInfo, report: CheckReport):
     io_per_osd: Dict[str, Dict[int, List[Tuple[int, int]]]] = \
         collections.defaultdict(lambda: collections.defaultdict(list))
     for osd in ceph.osds.values():
-        if osd.total_space:
+        if osd.space.total:
             for attr in ("reads", "writes", "read_b", "write_b"):
-                io_per_osd[attr][osd.total_space].append((getattr(osd.pg_stats, attr), osd.id))
+                io_per_osd[attr][osd.space.total].append((getattr(osd.pg_stats, attr), osd.id))
 
     sett = config.get("max_load_diff", {})
     min_ops = sett.get("min_mops", 1) * 1000000
@@ -491,9 +487,9 @@ def osd_of_same_size_has_close_load(config: CheckConfig, cluster: Cluster, ceph:
 
             if diff > max_diff:
                 report.add_extra_message(Severity.warning,
-                    f"OSD's of size {b2ssize(sz)} has too large deviation in {name} load - " +
-                    f"{diff:.2f} between most({osd_max_id}) and least({osd_min_id}) loaded OSD's, " +
-                    f"which is greter then max allowed {max_diff}")
+                                         f"OSD's of size {b2ssize(sz)} has too large deviation in {name} load - " +
+                                         f"{diff:.2f} between most({osd_max_id}) and least({osd_min_id}) " +
+                                         f"loaded OSD's, which is greter then max allowed {max_diff}")
                 failed = True
 
     report.add_result(not failed, "Too large dispersion in load of osd's with same sizes" if failed else "")
@@ -511,7 +507,7 @@ expected_wr_speed = {
 
 
 @checker(Severity.warning, "OSD has enought journal/db/wal")
-def osd_has_enought_journal_db(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+def osd_has_enought_journal_db(config: CheckConfig, _: Cluster, ceph: CephInfo, report: CheckReport):
     bad_size_count = 0
 
     wal_part_min = config.get("wal_part_min", 0.005)
@@ -528,16 +524,16 @@ def osd_has_enought_journal_db(config: CheckConfig, cluster: Cluster, ceph: Ceph
 
             if sinfo.journal.partition_info.size / 2 ** 20 < min_j_size:
                 report.add_extra_message(Severity.warning,
-                    f"too small journal - " +
-                    f"{b2ssize(sinfo.journal.partition_info.size)}, min required is {min_j_size}",
-                    osd_t(osd.id))
+                                         f"too small journal - " +
+                                         f"{b2ssize(sinfo.journal.partition_info.size)}, min required is {min_j_size}",
+                                         osd_t(osd.id))
                 bad_size_count += 1
         else:
             assert isinstance(sinfo, BlueStoreInfo)
             data_part_size = sinfo.data.partition_info.size
             wal_part_size = sinfo.wal.partition_info.size
 
-            min_wal_size =  data_part_size * wal_part_min
+            min_wal_size = data_part_size * wal_part_min
             min_db_size = data_part_size * db_part_min
 
             this_failed = False
@@ -546,24 +542,24 @@ def osd_has_enought_journal_db(config: CheckConfig, cluster: Cluster, ceph: Ceph
                 if wal_part_size < min_wal_size + min_db_size:
                     this_failed = True
                     report.add_extra_message(Severity.warning,
-                        f"too small wal+db partition - {b2ssize(wal_part_size)}, " +
-                        f"min required is {b2ssize(min_wal_size + min_db_size)}",
-                        osd_t(osd.id))
+                                             f"too small wal+db partition - {b2ssize(wal_part_size)}, " +
+                                             f"min required is {b2ssize(min_wal_size + min_db_size)}",
+                                             osd_t(osd.id))
             else:
                 if wal_part_size < min_wal_size:
                     this_failed = True
                     report.add_extra_message(Severity.warning,
-                        f"too small wal partition - {b2ssize(wal_part_size)}, " +
-                        f"min required is {b2ssize(min_wal_size)}",
-                        osd_t(osd.id))
+                                             f"too small wal partition - {b2ssize(wal_part_size)}, " +
+                                             f"min required is {b2ssize(min_wal_size)}",
+                                             osd_t(osd.id))
 
                 db_part_size = sinfo.db.partition_info.size
                 if db_part_size < min_db_size:
                     this_failed = True
                     report.add_extra_message(Severity.warning,
-                        f"too small db partition - {b2ssize(db_part_size)}, " +
-                        f"min required is {b2ssize(min_db_size)}",
-                        osd_t(osd.id))
+                                             f"too small db partition - {b2ssize(db_part_size)}, " +
+                                             f"min required is {b2ssize(min_db_size)}",
+                                             osd_t(osd.id))
 
             if this_failed:
                 bad_size_count += 1
@@ -573,7 +569,7 @@ def osd_has_enought_journal_db(config: CheckConfig, cluster: Cluster, ceph: Ceph
 
 
 @checker(Severity.warning, "Disks schedulers")
-def storage_devs_schedulers(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+def storage_devs_schedulers(config: CheckConfig, cluster: Cluster, _: CephInfo, report: CheckReport):
     allowed_schedulers_dct = config.get("allowed_schedulers", {})
     err_count = 0
     for node in cluster.hosts.values():
@@ -581,10 +577,9 @@ def storage_devs_schedulers(config: CheckConfig, cluster: Cluster, ceph: CephInf
             allowed_schedulers = allowed_schedulers_dct.get(disk.tp.name, ['cfg', 'noop', 'deadline', 'none', None])
             if disk.scheduler not in allowed_schedulers:
                 err_count += 1
-                report.add_extra_message(Severity.warning,
-                    f"Disk {disk.name} has type {disk.tp.name} and scheduler {disk.scheduler}. " +
-                    f"Only {', '.join(map(str, allowed_schedulers))} schedulers recommended for this class",
-                    host_t(node.name))
+                msg = f"Disk {disk.name} has type {disk.tp.name} and scheduler {disk.scheduler}. " + \
+                    f"Only {', '.join(map(str, allowed_schedulers))} schedulers recommended for this class"
+                report.add_extra_message(Severity.warning, msg, host_t(node.name))
 
     report.add_result(err_count == 0,
                       "" if err_count == 0 else f"{err_count} disks has non-optimal schedulers")
@@ -602,28 +597,28 @@ def network_mtu(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: C
         cl = host.find_interface(ceph.cluster_net)
         pb = host.find_interface(ceph.public_net)
 
-        all = []
+        all_adapters = []
         if cl:
-            all.append(cl)
+            all_adapters.append(cl)
         if pb and pb is not cl:
-            all.append(pb)
+            all_adapters.append(pb)
 
-        for adapter in all:
+        for adapter in all_adapters:
             tp = 'cluster' if adapter is cl else 'public'
             parent_name = None
             if adapter.mtu < min_j_size:
                 report.add_extra_message(Severity.warning,
-                    f"Network device {adapter.dev} responcible for {tp} ceph net " +
-                    f"has MTU {adapter.mtu} < required {min_j_size}", host_t(host.name))
+                                         f"Network device {adapter.dev} responcible for {tp} ceph net " +
+                                         f"has MTU {adapter.mtu} < required {min_j_size}", host_t(host.name))
                 fails += 1
             elif '.' in adapter.dev:
                 parent_name = adapter.dev.split(".")[0]
                 mtu = host.net_adapters[parent_name].mtu
                 if mtu < min_j_size:
                     report.add_extra_message(Severity.warning,
-                        f"Network device {parent_name}, responcible for {tp} ceph net, " +
-                        f"which is parent for {adapter.dev} " +
-                        f"has MTU {mtu} < required {min_j_size}", host_t(host.name))
+                                             f"Network device {parent_name}, responcible for {tp} ceph net, " +
+                                             f"which is parent for {adapter.dev} has MTU {mtu} < required {min_j_size}",
+                                             host_t(host.name))
                     fails += 1
 
             if parent_name in host.bonds:
@@ -637,10 +632,10 @@ def network_mtu(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: C
                 mtu = host.net_adapters[src].mtu
                 if mtu < min_j_size:
                     report.add_extra_message(Severity.warning,
-                        f"Network device {src}, which is source for ceph bond, " +
-                        f"responcible for {tp} ceph net " +
-                        f"has MTU {mtu} < required {min_j_size}",
-                        host_t(host.name))
+                                             f"Network device {src}, which is source for ceph bond, " +
+                                             f"responcible for {tp} ceph net " +
+                                             f"has MTU {mtu} < required {min_j_size}",
+                                             host_t(host.name))
                     fails += 1
 
     report.add_result(fails == 0,
@@ -648,7 +643,7 @@ def network_mtu(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: C
 
 
 @checker(Severity.warning, "Filestore sync interval")
-def check_filestore_sync_interval(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+def check_filestore_sync_interval(config: CheckConfig, _: Cluster, ceph: CephInfo, report: CheckReport):
     if ceph.has_fs:
         cfg = config.get('fs_sync_interval', {})
         max_i = cfg.get("max", 30)
@@ -663,7 +658,7 @@ def check_filestore_sync_interval(config: CheckConfig, cluster: Cluster, ceph: C
 
 
 @checker(Severity.warning, "Network errors")
-def check_ceph_net_errors(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+def check_ceph_net_errors(config: CheckConfig, cluster: Cluster, _: CephInfo, report: CheckReport):
     cfg = config.get('net_issues', {})
     lost_max = cfg.get("lost_max_prob", 0.0001)
     no_budget_max_per_hour = cfg.get("no_budget_max_per_hour", 10)
@@ -720,4 +715,3 @@ def run_all_checks(config: CheckConfig, cluster: Cluster, ceph: CephInfo) -> Lis
         check(config, cluster, ceph, report)
 
     return report.results
-
