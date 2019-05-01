@@ -101,9 +101,9 @@ async def historic_iostat(opts: Any):
     inv = get_inventory(read_inventory(get_inventory_path()), opts.ceph_master)
     conns: Dict[str, IAIORPCNode] = {}
     async with get_pool() as pool:
-        for node, _ in inv:
+        for node in inv.nodes:
             conn = conns[node] = await pool.rpc_connect(node)
-            status: HistoricCollectionStatus = await conn.get_historic_collection_status()
+            status: HistoricCollectionStatus = await conn.proxy.ceph.get_historic_collection_status()
             assert status.cfg, f"Historic collection is not running on node {node}. Start it first"
 
         per_osd_data: Dict[int, List[int]] = collections.defaultdict(list)
@@ -111,7 +111,8 @@ async def historic_iostat(opts: Any):
         per_pool_data: Dict[int, List[int]] = collections.defaultdict(list)
 
         async def collect_node(conn: IAIORPCNode) -> None:
-            for sid, values in await conn.proxy.pull_collected_historic_summary():
+            res = await conn.proxy.ceph.pull_collected_historic_summary()
+            for sid, values in res.items():
                 if '.' in sid:
                     pool_id, pg_id = map(int, sid.split("."))
                     per_pg_data[(pool_id, pg_id)].extend(values)
@@ -137,8 +138,7 @@ async def historic_iostat(opts: Any):
             for pool_id, data in per_pool_data.items():
                 print(pool_id, len(data), sum(data))
 
-            await asyncio.sleep(status.cfg.duration)
-
+            await asyncio.sleep(status.cfg['attrs']['duration'])
 
 
 def parse_args(argv: List[str]) -> Any:
