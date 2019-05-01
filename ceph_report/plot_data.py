@@ -19,8 +19,8 @@ with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     import seaborn
 
-from koder_utils import b2ssize, plot_histo, XMLBuilder
-from cephlib import CrushMap, Crush, CephInfo
+from koder_utils import b2ssize, plot_histo, XMLBuilder, RawContent
+from cephlib import CrushMap, Crush, CephInfo, get_rule_replication_level
 
 from .visualize_utils import plot, tab
 from .report import Report
@@ -129,7 +129,7 @@ def get_color(w: float, cmap: numpy.ndarray, min_w: float, max_w: float) -> Tupl
 
 
 def to_dot_name(name: str) -> str:
-    return name.replace("-", "_").replace('.', '_')
+    return name.replace("-", "_").replace('.', '_').replace("~", "_")
 
 
 @dataclass
@@ -202,7 +202,7 @@ def get_tree_property(root: CrushMap.Bucket,
             if node.is_osd:
                 per_bucket[node.name] = osd_func(node)
             else:
-                childs = [dive(crush.bucket_by_id(bid)) for bid in node.items]
+                childs = [dive(crush.bucket_by_id(itm.id)) for itm in node.items]
                 per_bucket[node.name] = bucket_func(node, childs)
             per_class_bucket[node.type_name][node.name] = per_bucket[node.name]
         return per_bucket[node.name]
@@ -228,7 +228,7 @@ def get_data_size_colors(root: CrushMap.Bucket,
                          ceph: CephInfo,
                          cmaps: Dict[str, numpy.ndarray]) -> Dict[str, Tuple[str, str]]:
     data_per_class = get_tree_property(root, ceph.crush,
-                                       lambda node: ceph.osds[node.id].pg_stats.bytes,
+                                       lambda node: ceph.osds[node.id].pg_stats.num_bytes,
                                        lambda node, ch_vals: sum(ch_vals))
 
     data_per_class_summary = vals_summary_dct(data_per_class)
@@ -289,17 +289,16 @@ def make_dot(node: CrushMap.Bucket, crush: Crush, idmap: Dict[str, str], id_pref
     yield f'{dname} [label="{node.name}\\n00.00", id="{htmlid}"]'
     assert node.name not in idmap
     idmap[node.name] = htmlid
-    for child_id in node.items:
-        child = crush.bucket_by_id(child_id)
+    for child_itm in node.items:
+        child = crush.bucket_by_id(child_itm.id)
         if not child.is_osd:
             yield from make_dot(child, crush, idmap, id_prefix)
             yield f"{dname} -> {to_dot_name(child.name)};"
 
 
 @plot
-def plot_crush_rules(ceph: CephInfo, report: Report):
+def plot_crush_rules(ceph: CephInfo, report: Report) -> None:
     neato_path = distutils.spawn.find_executable('neato')
-
     if not neato_path:
         logger.warning("Neato tool not found, probably graphviz package is not installed. " +
                        "Rules graphs would not be generated")
@@ -310,8 +309,9 @@ def plot_crush_rules(ceph: CephInfo, report: Report):
                 continue
 
             cmaps = {"host": colormap_host}
-            if rule.replicated_on != "host":
-                cmaps[rule.replicated_on] = colormap_repl
+            replicated_on = get_rule_replication_level(rule)
+            if replicated_on != "host":
+                cmaps[replicated_on] = colormap_repl
 
             # maps crush node id to html node id
             idmap: Dict[str, str] = {}
@@ -327,12 +327,9 @@ def plot_crush_rules(ceph: CephInfo, report: Report):
                 svg = None
 
             if svg:
-                svg_doc = string_to_doc(svg[svg.index("<svg "):])
-
-                targets = []
                 div_id = f'div_{rule_name}'
-                doc = XMLBuilder('div', id=div_id)
-                with doc.center:
+                doc = XMLBuilder()
+                with doc.center(id=div_id):
                     for func, name in [(get_weight_colors, 'weight'),
                                        (get_used_space_colors, 'used_space'),
                                        (get_data_size_colors, 'data_size'),
@@ -351,7 +348,8 @@ def plot_crush_rules(ceph: CephInfo, report: Report):
                     report.onload.append(f"setColors(colors_{rule_name}_weight, '{div_id}',"
                                          f"'ptr_crush_{rule_name}_weight')")
                 doc.br()
-                report.add_block(f"crush_svg_{rule_name}", None, [doc, svg_doc], f"Tree for '{rule_name}'")
+                doc << RawContent(svg[svg.index("<svg "):])
+                report.add_block(f"crush_svg_{rule_name}", None, doc, f"Tree for '{rule_name}'")
 
 # @plot
 # @perf_info_required

@@ -3,18 +3,17 @@ from typing import Dict, Optional, Union
 
 import numpy
 
-from koder_utils import b2ssize_10, b2ssize, Table, Column, XMLBuilder, Align, fail, XMLNode, SimpleTable, RawContent
+from koder_utils import b2ssize_10, b2ssize, Table, Column, fail, XMLNode, SimpleTable, RawContent, AnyXML
 from cephlib import CephInfo
 
-from .visualize_utils import tab, plot, perf_info_required, table_to_doc
+from .visualize_utils import tab, plot, perf_info_required, table_to_xml_doc
 from .obj_links import pool_link, rule_link
 from .plot_data import get_histo_img
 
 
 def get_pools_load_table(ceph: CephInfo, uptime: bool) -> Table:
     class PoolLoadTable(Table):
-        class Params:
-            align = Align.left_right
+        __html_classes__ = "table_lr"
 
         pool = Column.s("Name")
         data = Column.ed("Data TiB", help="Pool total data in Tebibytes")
@@ -74,21 +73,20 @@ def get_pools_load_table(ceph: CephInfo, uptime: bool) -> Table:
 
 
 @tab("Pool's lifetime load")
-def show_pools_lifetime_load(ceph: CephInfo) -> XMLBuilder:
-    return table_to_doc(get_pools_load_table(ceph, True), id="table-pools-io-uptime")
+def show_pools_lifetime_load(ceph: CephInfo) -> AnyXML:
+    return table_to_xml_doc(get_pools_load_table(ceph, True), id="table-pools-io-uptime", zebra=True, sortable=True)
 
 
 @tab("Pool's curr load")
 @perf_info_required
-def show_pools_curr_load(ceph: CephInfo) -> XMLBuilder:
-    return table_to_doc(get_pools_load_table(ceph, False), id="table-pools-io")
+def show_pools_curr_load(ceph: CephInfo) -> AnyXML:
+    return table_to_xml_doc(get_pools_load_table(ceph, False), id="table-pools-io", zebra=True, sortable=True)
 
 
 @tab("Pool's stats")
-def show_pools_info(ceph: CephInfo) -> XMLBuilder:
+def show_pools_info(ceph: CephInfo) -> AnyXML:
     class PoolsTable(Table):
-        class Params:
-            align = Align.left_right
+        __html_classes__ = "table_lr"
         pool = Column.s()
         id = Column.d()
         size = Column.s()
@@ -189,11 +187,11 @@ def show_pools_info(ceph: CephInfo) -> XMLBuilder:
 
                 row.pg_count_deviation = f"{avg:.1f} ~ {dev_perc}%", int(avg * 1000)
 
-    return table_to_doc(table, id="table-pools")
+    return table_to_xml_doc(table, id="table-pools", sortable=True, zebra=True)
 
 
 @tab("PG's status")
-def show_pg_state(ceph: CephInfo) -> XMLBuilder:
+def show_pg_state(ceph: CephInfo) -> AnyXML:
     statuses: Dict[str, int] = collections.Counter()
 
     for pg_group in ceph.status.pgmap.pgs_by_state:
@@ -205,7 +203,7 @@ def show_pg_state(ceph: CephInfo) -> XMLBuilder:
     for status, count in sorted(statuses.items()):
         table.add_row(status, str(count), f"{100.0 * count / ceph.status.pgmap.num_pgs:.2f}")
 
-    return table_to_doc(table, id="table-pgs")
+    return table_to_xml_doc(table, id="table-pgs", sortable=True, zebra=True)
 
 
 @plot

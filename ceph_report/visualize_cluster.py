@@ -3,7 +3,7 @@ import logging
 import datetime
 import collections
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Iterator
+from typing import Callable, Dict, List, Optional
 
 import yaml
 
@@ -12,7 +12,7 @@ from koder_utils import (b2ssize_10, b2ssize, Table, Column, seconds_to_str, tab
 from cephlib import CephInfo, FileStoreInfo, BlueStoreInfo, Pool, get_rule_replication_level, get_rule_osd_class
 
 from .cluster import Cluster
-from .visualize_utils import tab, partition_by_len, table_to_doc
+from .visualize_utils import tab, partition_by_len, table_to_xml_doc
 from .checks import run_all_checks, CheckMessage
 from .report import Report
 from .obj_links import err_link, mon_link, pool_link
@@ -22,7 +22,7 @@ logger = logging.getLogger("report")
 
 
 @tab("Status")
-def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> XMLBuilder:
+def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> AnyXML:
     """
     Cluster short summary
     """
@@ -69,10 +69,10 @@ def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> XMLBuilder:
     mon_tm = time.mktime(ceph.status.monmap.modified.timetuple())
     collect_tm = time.mktime(time.strptime(cluster.report_collected_at_local, "%Y-%m-%d %H:%M:%S"))
     t.add_row("Monmap modified in", seconds_to_str(int(collect_tm - mon_tm)))
-    return table_to_doc(t, id="table-summary", sortable=False)
+    return table_to_xml_doc(t, id="table-summary")
 
 
-def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report):
+def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report) -> None:
     """
     Cluster issues
     """
@@ -118,7 +118,7 @@ def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report):
 
 
 @tab("Current IO Activity")
-def show_io_status(ceph: CephInfo) -> XMLBuilder:
+def show_io_status(ceph: CephInfo) -> AnyXML:
     """
     Current cluster IO load
     """
@@ -134,7 +134,7 @@ def show_io_status(ceph: CephInfo) -> XMLBuilder:
     t.add_row("Recovery IO MiBps", b2ssize(ceph.status.pgmap.recovering_bytes_per_sec // 2 ** 20))
     t.add_row("Recovery obj per second", b2ssize_10(ceph.status.pgmap.recovering_objects_per_sec))
 
-    return table_to_doc(t, id="table-io-summary", sortable=False)
+    return table_to_xml_doc(t, id="table-io-summary", sortable=False, zebra=True)
 
 
 class MonitorInfoTable(Table):
@@ -146,7 +146,7 @@ class MonitorInfoTable(Table):
 
 
 @tab("Monitors info")
-def show_mons_info(ceph: CephInfo) -> XMLBuilder:
+def show_mons_info(ceph: CephInfo) -> AnyXML:
     """
     Monitors info
     {MonitorInfoTable.help()}
@@ -184,11 +184,11 @@ def show_mons_info(ceph: CephInfo) -> XMLBuilder:
         row.free = perc, sort_by
         row.db_size = mon.database_size
 
-    return table_to_doc(table, id="table-mon-info")
+    return table_to_xml_doc(table, id="table-mon-info", zebra=True, sortable=True)
 
 
 @tab("Settings")
-def show_primary_settings(ceph: CephInfo) -> XMLBuilder:
+def show_primary_settings(ceph: CephInfo) -> AnyXML:
     """
     Most important cluster settings
     """
@@ -284,7 +284,7 @@ def show_primary_settings(ceph: CephInfo) -> XMLBuilder:
         table.add_row("Journal dio", ceph.settings.journal_dio)
         table.add_row("Filestorage sync", str(int(float(ceph.settings.filestore_max_sync_interval))) + 's')
 
-    return table_to_doc(table, id="table-settings")
+    return table_to_xml_doc(table, id="table-settings")
 
 
 class RulesetsTable(Table):
@@ -307,7 +307,7 @@ class RulesetsTable(Table):
 
 
 @tab("Crush rulesets")
-def show_ruleset_info(ceph: CephInfo) -> XMLBuilder:
+def show_ruleset_info(ceph: CephInfo) -> AnyXML:
     f"""
     Crush ruleset info
     """
@@ -385,7 +385,7 @@ def show_ruleset_info(ceph: CephInfo) -> XMLBuilder:
         row.disk_types = ["data: " + ", ".join(storage_disks_types), "wal/db/j: " + ", ".join(journal_disks_types)]
         row.data_disk_models = sorted(disks_info)
 
-    return table_to_doc(table, id="table-rules")
+    return table_to_xml_doc(table, id="table-rules", zebra=True, sortable=True)
 
 
 @tab("Cluster err/warn")
@@ -423,7 +423,7 @@ class NetsTable(Table):
 
 
 @tab("Whole cluster net")
-def show_whole_cluster_nets(cluster: Cluster) -> XMLBuilder:
+def show_whole_cluster_nets(cluster: Cluster) -> AnyXML:
     f"""
     Cluster networks summary
     """
@@ -452,7 +452,7 @@ def show_whole_cluster_nets(cluster: Cluster) -> XMLBuilder:
         row.total_err_uptime = info.usage.total_err
 
     tid = "table-cluster-nets-wide" if any_d_usage else "table-cluster-nets"
-    return table_to_doc(table, id=tid)
+    return table_to_xml_doc(table, id=tid, zebra=True, sortable=True)
 
 
 class IssuesTable(Table):
@@ -461,7 +461,7 @@ class IssuesTable(Table):
 
 
 @tab("Errors summary")
-def show_cluster_err_warn_summary(ceph: CephInfo) -> Iterator[AnyXML]:
+def show_cluster_err_warn_summary(ceph: CephInfo) -> Optional[AnyXML]:
     f"""
     Cluster logs errors/warnings summary and cluster health timeline
     """
@@ -472,12 +472,14 @@ def show_cluster_err_warn_summary(ceph: CephInfo) -> Iterator[AnyXML]:
         for name, cnt in sorted(ceph.errors_count.items(), key=lambda x: x[1]):
             table.add_row(name, cnt)
 
-        res = table_to_doc(table, id="table-errors-summary")
+        res = table_to_xml_doc(table, id="table-errors-summary")
         health_svg = plot_healthnes(ceph)
         if health_svg:
-            yield RawContent(f"{res}<br><br><br>{health_svg}")
-        else:
-            yield res
+            res.br()
+            res.br()
+            res.br()
+            res << RawContent(health_svg)
+        return res
 
 
 def plot_healthnes(ceph: CephInfo, width: int = 1400, height: int = 30) -> Optional[AnyXML]:

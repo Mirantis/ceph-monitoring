@@ -7,7 +7,7 @@ from typing import Optional, List, Tuple, Dict
 
 from koder_utils import XMLBuilder, RawContent, AnyXML
 
-from . import CheckMessage
+from .checks import CheckMessage
 
 
 logger = logging.getLogger('report')
@@ -25,7 +25,7 @@ class Report:
         self.onload: List[str] = ["onHashChanged()"]
         self.issues: Dict[str, List[CheckMessage]] = {}
 
-    def add_block(self, name: str, header: Optional[str], block_obj: XMLBuilder, menu_item: str = None):
+    def add_block(self, name: str, header: Optional[str], block_obj: AnyXML, menu_item: str = None):
         if menu_item is None:
             menu_item = header
         self.divs.append((name, header, menu_item, block_obj))
@@ -104,7 +104,7 @@ class Report:
                     doc.script(type="text/javascript", src="onload.js")
 
             with doc.body(onload="onload()"):
-                with doc.div(_class="menu-ceph"):
+                with doc.div(class_="menu-ceph"):
                     with doc.ul():
                         for idx, div in enumerate(self.divs):
                             if div is not None:
@@ -113,7 +113,7 @@ class Report:
                                     if menu.endswith(":"):
                                         menu = menu[:-1]
                                     doc.li.span(menu,
-                                                _class="menulink",
+                                                class_="menulink",
                                                 onclick=f"clicked('{name}')",
                                                 id=f"ptr_{name}")
 
@@ -121,7 +121,7 @@ class Report:
                     doc("\n")
                     if div is not None:
                         name, header, menu_item, block = div
-                        with doc.div(_class="data-ceph", id=name):
+                        with doc.div(class_="data-ceph", id=name):
                             if header is None:
                                 doc << block
                             else:
@@ -130,68 +130,21 @@ class Report:
                                 doc << block
         return doc
 
-    # def encrypt(self, doc: XMLDocument, password: str, static_files_dir: Path, output_dir: Path):
-    #     body_s = str(doc) + " "
-    #     if len(body_s) % 32:
-    #         body_s += " " * (32 - len(body_s) % 32)
-    #
-    #     import os
-    #     import base64
-    #     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-    #     from cryptography.hazmat.backends import default_backend
-    #
-    #     backend = default_backend()
-    #     iv = os.urandom(16)
-    #     cipher = Cipher(algorithms.AES(password), modes.CBC(iv), backend=backend)
-    #     encryptor = cipher.encryptor()
-    #     encrypted_body = iv + encryptor.update(body_s.encode("utf8")) + encryptor.finalize()
-    #     encrypted_body_base64 = base64.b64encode(encrypted_body)
-    #
-    #     step = 128
-    #     header = 'encrypted = "'
-    #     idx = step - len(header)
-    #     header += encrypted_body_base64[0: idx] + '"'
-    #     parts = [header]
-    #     while idx < len(encrypted_body_base64):
-    #         parts.append(' + "' + encrypted_body_base64[idx: idx + step] + '"')
-    #         idx += step
-    #
-    #     enc_code = " \\\n      ".join(parts)
-    #     doc = XMLDocument('html')
-    #     _, link_or_data = self.insert_js_css("aesjs.js", True, static_files_dir, output_dir)
-    #
-    #     with doc.head:
-    #         doc.script(type="text/javascript", src=link_or_data)
-    #         doc.script(type="text/javascript")(enc_code)
-    #
-    #     with doc.body.center:
-    #         doc('Report encrypted, to encrypt enter password and press "decrypt": ')
-    #         doc.input(type="password", id="password")
-    #         doc.input(type="button",
-    #                   onclick="decode(document.getElementById('password').value)",
-    #                   value="Decrypt")
-
-    def render(self, pretty_html: bool = False,
-               embed: bool = False, encrypt: str = None) -> str:
+    def render(self, pretty_html: bool = False, embed: bool = False) -> str:
 
         static_files_dir = Path(__file__).absolute().parent.parent / "html_js_css"
         assert embed
         doc = self.make_body(embed, None, static_files_dir)
 
-        assert not encrypt
-
-        # if encrypt:
-        #     logger.info("Encrypting report with AES")
-        #     assert embed
-        #     self.encrypt(doc, encrypt, static_files_dir, output_dir)
-
         index = f"<!doctype html>{doc}"
         try:
             if pretty_html:
                 from bs4 import BeautifulSoup
-                index = BeautifulSoup.BeautifulSoup(index).prettify()
-        except:
-            pass
+                index = BeautifulSoup(index, features="html.parser").prettify()
+        except ImportError:
+            logger.error("Can't prettify - BeautifulSoup is not installed")
+        except Exception as exc:
+            logger.error(f"Failed to prettify {exc}")
 
         # TODO: I dunno why it need's this
         return index.replace("window.onload = sorttable.init", "")

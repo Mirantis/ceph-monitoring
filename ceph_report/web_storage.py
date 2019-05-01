@@ -1,7 +1,5 @@
 import re
 import sys
-
-import requests
 import ssl
 import json
 import time
@@ -13,7 +11,9 @@ import functools
 from urllib.parse import urljoin
 from typing import List, Dict, Tuple, BinaryIO
 
+import requests
 from aiohttp import web, BasicAuth, ClientSession
+
 from .utils import parse_file_name, FileType
 
 

@@ -2,9 +2,10 @@ import collections
 from typing import Callable, Union, Optional, List, Tuple, Dict, Set, Sequence, Mapping
 
 from koder_utils import b2ssize_10, b2ssize, Host, LogicBlockDev, DiskType, Disk, SimpleTable, AnyXML, htag, XMLBuilder
+
 from .ceph_loader import CephInfo
 from .cluster import Cluster
-from .visualize_utils import val_to_color, perf_info_required, tab, table_to_doc
+from .visualize_utils import val_to_color, perf_info_required, tab, table_to_xml_doc
 from .obj_links import host_link
 
 
@@ -93,7 +94,7 @@ def make_storage_devs_load_table(hosts: Sequence[Host],
                 else:
                     s_val = 0 if val < 1 else conversion(val)
 
-                cell_data = ~htag.div(dev.name, _class="left") + htag.div(text=s_val, _class="right")
+                cell_data = ~htag.div(dev.name, class_="left") + htag.div(text=s_val, class_="right")
 
                 if val is not None:
                     table.add_cell(cell_data, bgcolor=color, sorttable_customkey=str(val))
@@ -106,7 +107,7 @@ def make_storage_devs_load_table(hosts: Sequence[Host],
 
         table.next_row()
 
-    return table_to_doc(table, zebra='false', extra_cls="io_load_in_color")
+    return table_to_xml_doc(table, zebra=True, sortable=True, classes="io_load_in_color")
 
 
 @tab("Storage devs load")
@@ -206,7 +207,7 @@ def show_host_network_load_in_color(cluster: Cluster, ceph: CephInfo) -> AnyXML:
                     if net_name in std_nets:
                         text = load_text
                     else:
-                        text = ~htag.div(net_name, _class="left") + htag.div(load_text, _class="right")
+                        text = ~htag.div(net_name, class_="left") + htag.div(load_text, class_="right")
 
                     table.add_cell(text, bgcolor=color, sorttable_customkey=str(load_bps))
 
@@ -217,7 +218,7 @@ def show_host_network_load_in_color(cluster: Cluster, ceph: CephInfo) -> AnyXML:
 
         doc.h4(name)
         doc.br()
-        doc << table_to_doc(table, zebra='false', extra_cls="table-net-load")
+        doc << table_to_xml_doc(table, sortable=True, extra_cls="table-net-load")
 
         if not last:
             doc.br()

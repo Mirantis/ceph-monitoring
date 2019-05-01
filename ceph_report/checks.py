@@ -7,7 +7,7 @@ from typing import List, Dict, Callable, Any, Optional, Tuple
 from koder_utils import b2ssize, DiskType
 from cephlib import FileStoreInfo, BlueStoreInfo, CephInfo
 
-from . import Cluster
+from .cluster import Cluster
 
 # Check
 # mount options

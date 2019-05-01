@@ -13,10 +13,11 @@ import datetime
 import collections
 from typing import Iterator, List, Dict, Tuple, Any, NamedTuple, Set
 
-from ceph_report.visualize_utils import table_to_doc
-from koder_utils import Table, Column, doc_to_string
+from ceph_report.visualize_utils import table_to_xml_doc
+from koder_utils import Table, Column
 
-from . import Report, get_file
+from . import get_file
+from .report import Report
 from .checks import CheckMessage, Severity, ErrTarget, ServiceType
 from .visualize import make_report, prepare_path
 from .utils import parse_file_name, FileType, FileInfo, FileInfoId, ClusterId
@@ -137,7 +138,7 @@ class ReportsHTMLIndex:
                                                 link_to_issues=f"{info.name}#issues",
                                                 issues_summary=", ".join(status))
 
-        tbl_html = doc_to_string(table_to_doc(ct, sortable=False))
+        tbl_html = str(table_to_xml_doc(ct, sortable=False))
         html = f"<html><title>Reports for customer {customer}, cluster {cluster}</title><head>" + \
             f"{self.css_part}</head><body><center>{tbl_html}</center></body></html>"
 
@@ -176,7 +177,7 @@ class ReportsHTMLIndex:
                                  issues_link=href("issues", latest_info.link_to_issues),
                                  status=latest_info.issues_summary)
 
-        tbl_html = doc_to_string(table_to_doc(tb, sortable=False))
+        tbl_html = str(table_to_xml_doc(tb, sortable=False))
         html = f"<html><title>Mirantis customers ceph reports</title><head>" + \
             f"{self.css_part }</head><body><center>{tbl_html}</center></body></html>"
 
@@ -192,7 +193,7 @@ class ReportsHTMLIndex:
                                  plot=True)
             html_info = finfo.copy(ftype=FileType.report_html)
             with (self.html_folder / html_info.name).open("w") as fd:
-                fd.write(report.render(encrypt=None, embed=True, pretty_html=False))
+                fd.write(report.render(embed=True, pretty_html=False))
 
             html_meta = html_info.copy(ftype=FileType.meta, ref_ftype=html_info.ftype)
             with (self.html_folder / html_meta.name).open("w") as fd:

@@ -3,7 +3,7 @@ from typing import Union, Iterable, Callable, Sequence, Tuple, List, TypeVar, An
 
 import numpy
 
-from koder_utils import XMLBuilder, SimpleTable, Table, table_to_html
+from koder_utils import SimpleTable, Table, table_to_html, XMLNode
 
 
 class StopError(Exception):
@@ -46,12 +46,26 @@ def_color_map: CMap = (
 )
 
 
-def table_to_doc(table: Union[SimpleTable, Table], **attrs) -> XMLBuilder:
-    attrs.pop("sortable", None)
-    attrs.pop("align", None)
-    doc = table_to_html(table)
-    doc(**attrs)
-    return doc
+def table_to_xml_doc(table: Union[SimpleTable, Table],
+                     classes: str = "",
+                     borders: bool = True,
+                     sortable: bool = False,
+                     zebra: bool = False,
+                     center_table: bool = True,
+                     **attrs) -> XMLNode:
+
+    classes_set = set(classes.split())
+
+    if sortable:
+        classes_set.add("sortable")
+
+    if zebra:
+        classes_set.add("zebra-table")
+
+    if borders:
+        classes_set.add("table-bordered")
+
+    return XMLNode("center") << table_to_html(table, classes=classes_set)(**attrs)
 
 
 def val_to_color(val: float, color_map: CMap = def_color_map) -> str:

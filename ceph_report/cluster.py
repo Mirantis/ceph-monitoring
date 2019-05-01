@@ -15,7 +15,7 @@ from koder_utils import (AttredStorage, TypedStorage, parse_lshw_info, Host, par
 from cephlib import CephInfo
 from koder_utils.linux import parse_meminfo
 
-from . import CephLoader
+from .ceph_loader import CephLoader
 
 logger = logging.getLogger("ceph_report")
 

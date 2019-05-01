@@ -18,11 +18,15 @@ from dataclasses import dataclass, field
 from typing import Coroutine, AsyncIterable, TypeVar, cast, Set, Iterator, Optional, Tuple, Dict, Any, List
 
 import aiorpc_service
-from aiorpc import ConnectionPool, HistoricCollectionConfig, HistoricCollectionStatus, IAOIRPCNode, iter_unreachable
+from aiorpc import ConnectionPool, HistoricCollectionConfig, HistoricCollectionStatus, IAIORPCNode, iter_unreachable
 from aiorpc_service import get_config as get_aiorpc_config, get_http_conn_pool_from_cfg, get_inventory_path
 from cephlib import parse_ceph_version, CephReport, CephRelease, CephCLI, get_ceph_version, CephRole
 from koder_utils import (make_storage, IAsyncNode, LocalHost, get_hostname, ignore_all, get_all_ips, IStorage,
                          b2ssize, rpc_map, read_inventory)
+try:
+    import stackprinter
+except:
+    stackprinter = None
 
 from . import setup_logging, get_file
 from .collectors import ALL_COLLECTORS, Role, CephCollector, Collector
@@ -267,11 +271,11 @@ async def get_report(ceph_master: str, pool: ConnectionPool, timeout: float, cep
             return await _get_report(conn)
 
 
-def get_inventory(opts: Any, node_list: List[str]) -> Inventory:
-    if opts.ceph_master is None:
+def get_inventory(node_list: List[str], ceph_master: str = None) -> Inventory:
+    if ceph_master is None:
         ceph_master = node_list[0] if node_list else 'localhost'
     else:
-        ceph_master = opts.ceph_master
+        ceph_master = ceph_master
 
     return Inventory(nodes=set(node_list), roles={}, ceph_master=ceph_master)
 
@@ -285,7 +289,7 @@ async def do_preconfig(opts: Any) -> RemoteNodesCfg:
     aiorpc_cfg = get_aiorpc_config(path=None)
     conn_pool = get_http_conn_pool_from_cfg(aiorpc_cfg)
     node_list = read_inventory(get_inventory_path())
-    inv = get_inventory(opts, node_list)
+    inv = get_inventory(node_list, opts.ceph_master)
 
     async with conn_pool:
         ceph_report, raw = await get_report(inv.ceph_master, conn_pool, aiorpc_cfg.cmd_timeout, opts.ceph_extra_args)
@@ -421,7 +425,7 @@ MiB = 2 ** 20
 GiB = 2 ** 30
 
 
-async def historic_start_coro(conn: IAOIRPCNode, hostname: str, cfg: RemoteNodesCfg, all_names: List[str]) -> None:
+async def historic_start_coro(conn: IAIORPCNode, hostname: str, cfg: RemoteNodesCfg, all_names: List[str]) -> None:
     cmds = [f'rados {cfg.ceph_extra_args_s} --format json df',
             f'ceph {cfg.ceph_extra_args_s} --format json df',
             f'ceph {cfg.ceph_extra_args_s} --format json -s']
@@ -459,7 +463,7 @@ async def start_historic(cfg: RemoteNodesCfg) -> None:
 
 
 async def status_historic(conn_pool: ConnectionPool, inventory: Inventory) -> None:
-    async def coro(conn: IAOIRPCNode, _: str) -> Optional[HistoricCollectionStatus]:
+    async def coro(conn: IAIORPCNode, _: str) -> Optional[HistoricCollectionStatus]:
         return await conn.proxy.ceph.get_historic_collection_status()
 
     async for hostname, res in rpc_map(conn_pool, coro, inventory.get(CephRole.osd)):
@@ -472,7 +476,7 @@ async def status_historic(conn_pool: ConnectionPool, inventory: Inventory) -> No
 
 
 async def stop_historic(conn_pool: ConnectionPool, inventory: Inventory) -> None:
-    async def coro(conn: IAOIRPCNode, _: str) -> None:
+    async def coro(conn: IAIORPCNode, _: str) -> None:
         await conn.proxy.ceph.stop_historic_collection()
 
     async for hostname, res in rpc_map(conn_pool, coro, inventory.get(CephRole.osd)):
@@ -483,7 +487,7 @@ async def stop_historic(conn_pool: ConnectionPool, inventory: Inventory) -> None
 
 
 async def remove_historic(conn_pool: ConnectionPool, inventory: Inventory) -> None:
-    async def coro(conn: IAOIRPCNode, _: str) -> None:
+    async def coro(conn: IAIORPCNode, _: str) -> None:
         await conn.proxy.ceph.remove_historic_data()
 
     async for hostname, res in rpc_map(conn_pool, coro, inventory.get(CephRole.osd)):
@@ -494,7 +498,7 @@ async def remove_historic(conn_pool: ConnectionPool, inventory: Inventory) -> No
 
 
 async def collect_historic(conn_pool: ConnectionPool, inventory: Inventory, storage: IStorage) -> None:
-    async def coro(conn: IAOIRPCNode, hostname: str) -> int:
+    async def coro(conn: IAIORPCNode, hostname: str) -> int:
         with storage.get_fd(f"{hostname}.bin", "cb") as fd:
             async for chunk in conn.collect_historic():
                 fd.write(chunk)
@@ -509,8 +513,7 @@ async def collect_historic(conn_pool: ConnectionPool, inventory: Inventory, stor
 
 def parse_args(argv: List[str]) -> Any:
 
-    root_parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-                                          usage='%(prog)s [options] [-- ceph_extra_args]')
+    root_parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     subparsers = root_parser.add_subparsers(dest='subparser_name')
 
@@ -602,6 +605,8 @@ def parse_args(argv: List[str]) -> Any:
                             help="Run all ceph cluster commands from NODE, (first inventory node by default)")
         parser.add_argument("--must-connect-to-all", action="store_true",
                             help="Must successfully connect to all ceph nodes")
+        parser.add_argument("--extended-tb", action="store_true",
+                            help="Show extended tb information")
 
     # ------------------------------------------------------------------------------------------------------------------
 
@@ -644,6 +649,18 @@ async def historic_main(opts: Any, subparser: str):
 def main(argv: List[str]) -> int:
     opts = parse_args(argv)
     log_config = get_file("logging.json")
+
+    if opts.extended_tb:
+        if stackprinter:
+
+            def hook(*args):
+                msg = stackprinter.format(args, style='color')
+                print(msg)
+                logger.critical(stackprinter.format(args, style='plaintext'))
+
+            sys.excepthook = hook
+        else:
+            logger.error("Can't set extended tb, as no module 'stackprinter' installed ")
 
     if opts.subparser_name == 'collect_config':
         # make opts from config

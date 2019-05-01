@@ -3,11 +3,6 @@ import logging.config
 from pathlib import Path
 from typing import Optional
 
-from .ceph_loader import CephLoader
-from .cluster import Cluster, load_all, fill_usage, fill_cluster_nets_roles
-from .checks import CheckMessage
-from .report import Report
-
 
 files_folder = Path(__file__).resolve().parent.parent / 'ceph_report_files'
 
@@ -39,4 +34,3 @@ def setup_logging(log_config_file: Path, log_level: str, out_folder: Optional[Pa
         log_config['loggers'][key]["handlers"] = handlers
 
     logging.config.dictConfig(log_config)
-

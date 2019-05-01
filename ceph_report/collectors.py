@@ -15,7 +15,7 @@ from enum import IntEnum
 from dataclasses import dataclass, field
 from typing import Any, List, Dict, Optional, Tuple, TypeVar, Callable, Coroutine, Union, cast
 
-from aiorpc import IAOIRPCNode, ConnectionPool
+from aiorpc import IAIORPCNode, ConnectionPool
 from cephlib import CephRelease, parse_ceph_volumes_js, parse_ceph_disk_js, CephReport, OSDDevInfo, OSDBSDevices, \
     OSDFSDevices
 from koder_utils import (IStorage, CMDResult, parse_devices_tree, collect_process_info, get_host_interfaces,
@@ -55,7 +55,7 @@ class Collector:
         return self.__class__(storage, self.hostname, self.opts, self.pool)  # type: ignore
 
     @contextlib.asynccontextmanager
-    async def connection(self) -> IAOIRPCNode:
+    async def connection(self) -> IAIORPCNode:
         assert self.hostname is not None
         async with self.pool.connection(self.hostname) as conn:
             yield conn

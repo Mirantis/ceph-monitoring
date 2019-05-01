@@ -1,5 +1,3 @@
-// import * as aesjs from "./aesjs";
-
 let curr_hash = "";
 
 function clicked(el_id) {
@@ -55,15 +53,3 @@ function setColors(cmap, divid, linkid) {
 
 window.onhashchange = onHashChanged;
 
-function decode(pwd) {
-    const decoded_and_iv = atob(encrypted_page);
-    const iv = decoded_and_iv.substr(0, 16);
-    const data = decoded_and_iv.substr(16);
-    const aesCbc = new aesjs.ModeOfOperation.cbc(pwd, iv);
-    const decryptedBytes = aesCbc.decrypt(data);
-    if (decryptedBytes[decryptedBytes.length - 1] !== " ") {
-        alert("Wrong password!");
-    } else {
-        document.getElementsByTagName('body')[0].innerHTML = decryptedBytes;
-    }
-}

@@ -6,9 +6,9 @@ from typing import Dict, Any, List, Union, Tuple, Optional
 
 from koder_utils import parse_info_file_from_proc, AttredDict, TypedStorage
 from cephlib import (PGDump, StatusRegion, MonRole, Host, CephInfo, CephOSD, OSDStatus, MonsMetadata, FileStoreInfo,
-                     BlueStoreInfo, OSDProcessInfo, CephDevInfo, parse_ceph_version_simple, CephRelease,
+                     BlueStoreInfo, OSDProcessInfo, CephDevInfo, parse_ceph_version_simple,
                      parse_txt_ceph_config, Crush, parse_pg_distribution, OSDSpace, CephReport, parse_cmd_output,
-                     CephStatus, MonMetadata, RadosDF, PGStat, CephIOStats, CephMonitor, Pool, OSDDf, OSDPerf,
+                     CephStatus, MonMetadata, RadosDF, PGStat, CephIOStats, CephMonitor, Pool, OSDDf,
                      OSDDevCfg)
 
 
@@ -269,7 +269,7 @@ class CephLoader:
 
     def load_monitors(self) -> Dict[str, CephMonitor]:
         result: Dict[str, CephMonitor] = {}
-        luminous = self.release >= CephRelease.luminous
+        # luminous = self.release >= CephRelease.luminous
         for mon in self.status.monmap.mons:
             meta = self.mon_meta[mon.name]
             mon = CephMonitor(name=mon.name,

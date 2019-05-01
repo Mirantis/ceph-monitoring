@@ -6,10 +6,10 @@ import numpy
 from dataclasses import dataclass
 
 from koder_utils import (b2ssize, b2ssize_10, LogicBlockDev, DiskType, Disk, seconds_to_str_simple, group_by,
-                         XMLBuilder, ok, fail, SimpleTable, Column, Table, Align, RawContent)
+                         ok, fail, SimpleTable, Column, Table, RawContent, AnyXML)
 
 from cephlib import CephInfo, OSDStatus, CephVersion, BlueStoreInfo, FileStoreInfo, CephOSD
-from .visualize_utils import tab, partition_by_len, to_html_histo, plot, table_to_doc
+from .visualize_utils import tab, partition_by_len, to_html_histo, plot, table_to_xml_doc
 from .obj_links import osd_link, host_link
 from .checks import expected_wr_speed
 from .plot_data import get_histo_img
@@ -82,7 +82,7 @@ def group_osds(ceph: CephInfo) -> List[List[OSDInfo]]:
 
 
 @tab("OSD's state")
-def show_osd_state(ceph: CephInfo) -> XMLBuilder:
+def show_osd_state(ceph: CephInfo) -> AnyXML:
     statuses: Dict[OSDStatus, List[str]] = collections.defaultdict(list)
 
     for osd in ceph.osds.values():
@@ -95,10 +95,12 @@ def show_osd_state(ceph: CephInfo) -> XMLBuilder:
         status = ok(status.name) if status == OSDStatus.up else fail(status.name)
         table.add_row(str(status), str(len(osds)), ids)
 
-    return table_to_doc(table, id="table-osds-state")
+    return table_to_xml_doc(table, id="table-osds-state", sortable=True, zebra=True)
 
 
 class OSDLoadTableAgg(Table):
+    __html_classes__ = "table_lr"
+
     ids = Column.s("OSD id's", dont_sort=True)
     node = Column.s()
     class_and_rules = Column.s("Class<br>rules")
@@ -117,7 +119,7 @@ class OSDLoadTableAgg(Table):
 
 
 @tab("OSD process info aggregated")
-def show_osd_proc_info_agg(ceph: CephInfo) -> XMLBuilder:
+def show_osd_proc_info_agg(ceph: CephInfo) -> AnyXML:
 
     records: Dict[Tuple[str, str, Tuple[str, ...]], List[CephOSD]] = collections.defaultdict(list)
     id2rule = {rule.rule_id: rule for rule in ceph.crush.crushmap.rules}
@@ -155,10 +157,12 @@ def show_osd_proc_info_agg(ceph: CephInfo) -> XMLBuilder:
         row.write = to_html_histo([osd.pg_stats.num_write_kb * 1024 for osd in osds],
                                   short=True, tostr=b2ssize)  # type: ignore
 
-    return table_to_doc(table, id="table-osd-process-info-agg", align=Align.left_right)
+    return table_to_xml_doc(table, id="table-osd-process-info-agg", sortable=True, zebra=True)
 
 
 class OSDLoadTable(Table):
+    __html_classes__ = "table_lr"
+
     id = Column.s()
     node = Column.s()
     class_ = Column.s("Class")
@@ -178,7 +182,7 @@ class OSDLoadTable(Table):
 
 
 @tab("OSD process info")
-def show_osd_proc_info(ceph: CephInfo) -> XMLBuilder:
+def show_osd_proc_info(ceph: CephInfo) -> AnyXML:
     table = OSDLoadTable()
     id_to_rule = {rule.rule_id: rule for rule in ceph.crush.crushmap.rules}
     for osd in ceph.sorted_osds:
@@ -212,13 +216,13 @@ def show_osd_proc_info(ceph: CephInfo) -> XMLBuilder:
         row.read = tostr(osd.pg_stats.num_read_kb / 2 ** 30)
         row.write_ops = tostr(osd.pg_stats.num_write / 10 ** 6)
         row.write = tostr(osd.pg_stats.num_write_kb / 2 ** 30)
-    return table_to_doc(table, id="table-osd-process-info", align=Align.left_right)
+    return table_to_xml_doc(table, id="table-osd-process-info", sortable=True, zebra=True)
 
 
 @tab("OSD info")
-def show_osd_info(ceph: CephInfo) -> XMLBuilder:
+def show_osd_info(ceph: CephInfo) -> AnyXML:
     class OSDInfoTable(Table):
-        # id = html.Column.s()
+        __html_classes__ = "table_lr"
         count = Column.ed()
         ids = Column.list(chars_per_line=50)
         node = Column.s()
@@ -361,7 +365,7 @@ def show_osd_info(ceph: CephInfo) -> XMLBuilder:
             assert osd_info.db_size is not None
             row.db_size = size_s if osd_info.db_size >= min_db_size else fail(size_s), osd_info.db_size
 
-    return table_to_doc(table, id="table-osd-info", align=Align.left_right)
+    return table_to_xml_doc(table, id="table-osd-info", zebra=True, sortable=True)
 
 
 def add_dev_info(row: Any, dev: Union[Disk, LogicBlockDev], attr: str, uptime: float, with_read: bool = True):
@@ -397,7 +401,7 @@ def get_lat_val(osd: CephOSD, lat_name: str) -> Optional[str]:
 
 
 @tab("OSD's dev uptime average load")
-def show_osd_perf_info(ceph: CephInfo) -> XMLBuilder:
+def show_osd_perf_info(ceph: CephInfo) -> AnyXML:
     class Tbl(Table):
         osd = Column.s()
         cls = Column.s("Class")
@@ -454,11 +458,11 @@ def show_osd_perf_info(ceph: CephInfo) -> XMLBuilder:
             add_dev_info(trow, osd.storage_info.wal.dev_info, "wal", osd.host.uptime, with_read=False)
             add_dev_info(trow, osd.storage_info.db.dev_info, "db", osd.host.uptime)
 
-    return table_to_doc(table, id="table-osd-dev-uptime-load")
+    return table_to_xml_doc(table, id="table-osd-dev-uptime-load", zebra=True, sortable=True)
 
 
 @tab("PG copy per OSD")
-def show_osd_pool_pg_distribution(ceph: CephInfo) -> Optional[XMLBuilder]:
+def show_osd_pool_pg_distribution(ceph: CephInfo) -> Optional[AnyXML]:
     if ceph.sum_per_osd is None:
         logger.warning("PG copy per OSD: No pg dump data. Probably too many PG")
         return None
@@ -494,11 +498,11 @@ def show_osd_pool_pg_distribution(ceph: CephInfo) -> Optional[XMLBuilder]:
 
     list(map(table.add_cell, (ceph.sum_per_pool[pool_name] for pool_name in pools)))  # type: ignore
     table.add_cell(str(sum(ceph.sum_per_pool.values())))
-    return table_to_doc(table, id="table-pg-per-osd")
+    return table_to_xml_doc(table, id="table-pg-per-osd", zebra=True, sortable=True)
 
 
 @tab("PG copy per OSD")
-def show_osd_pool_agg_pg_distribution(ceph: CephInfo) -> Optional[XMLBuilder]:
+def show_osd_pool_agg_pg_distribution(ceph: CephInfo) -> Optional[AnyXML]:
     if ceph.sum_per_osd is None:
         logger.warning("PG copy per OSD: No pg dump data. Probably too many PG")
         return None
@@ -537,7 +541,7 @@ def show_osd_pool_agg_pg_distribution(ceph: CephInfo) -> Optional[XMLBuilder]:
         row.p70 = counts[int(len(counts) * 0.7)]
         row.p90 = counts[int(len(counts) * 0.9)]
 
-    return table_to_doc(table, id="table-pg-per-osd-agg")
+    return table_to_xml_doc(table, id="table-pg-per-osd-agg", zebra=True, sortable=True)
 
 
 @plot

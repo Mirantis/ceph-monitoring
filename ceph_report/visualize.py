@@ -21,7 +21,7 @@ import seaborn
 seaborn.set()
 del seaborn
 
-from koder_utils import make_storage, TypedStorage, XMLBuilder, AnyXML
+from koder_utils import make_storage, TypedStorage, AnyXML
 
 from . import setup_logging, get_file
 from .cluster import load_all, fill_usage, fill_cluster_nets_roles
@@ -92,16 +92,16 @@ def make_report(name: str, d1_path: pathlib.Path, d2_path: pathlib.Path = None, 
         show_osd_proc_info_agg,
         show_osd_perf_info,
         show_pg_state,
-        # show_cluster_err_warn_summary,
+        show_cluster_err_warn_summary,
         show_cluster_err_warn,
         (show_osd_pool_agg_pg_distribution if len(ceph.osds) > 20 else show_osd_pool_pg_distribution),
         show_host_io_load_in_color,
         show_host_network_load_in_color,
         show_whole_cluster_nets,
-        # show_osd_used_space_histo,
+        show_osd_used_space_histo,
         # show_osd_pg_histo,
-        # show_pg_size_kde,
-        # plot_crush_rules
+        show_pg_size_kde,
+        plot_crush_rules
     ]
 
     params = {"ceph": ceph, "cluster": cluster, "report": report, "uptime": not cluster.has_second_report}
@@ -138,7 +138,6 @@ def parse_args(argv):
     p.add_argument("-p", "--pretty-html", help="Prettify index.html", action="store_true")
     p.add_argument("--profile", help="Profile report creation", action="store_true")
     p.add_argument("-e", "--embed", action='store_true', help="Embed js/css files into report to make it stand-alone")
-    p.add_argument("--encrypt", metavar="PASSWORD", default=None, help="Encrypt file, only work with --embed")
     p.add_argument("path", help="Folder with data, or .tar.gz archive")
     p.add_argument("old_path", nargs='?', help="Older folder with data, or .tar.gz archive to calculate load")
     return p.parse_args(argv[1:])
@@ -177,9 +176,7 @@ def main(argv: List[str]):
 
     try:
         report = make_report(name=opts.name, d1_path=d1_path, d2_path=d2_path, plot=opts.plot)
-        index_path.open("w").write(report.render(pretty_html=opts.pretty_html,
-                                                 embed=opts.embed,
-                                                 encrypt=opts.encrypt))
+        index_path.open("w").write(report.render(pretty_html=opts.pretty_html, embed=opts.embed))
         logger.info("Report successfully stored to %r", str(index_path))
     except StopError:
         pass

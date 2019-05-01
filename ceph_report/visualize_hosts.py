@@ -1,17 +1,17 @@
 import collections
 from typing import Dict, List, Union, Optional, Tuple, Set
 
-from koder_utils import (b2ssize, b2ssize_10, flatten, Table, Column, Disk, LogicBlockDev, group_by, Align, XMLBuilder,
-                         SimpleTable, htag)
+from koder_utils import (b2ssize, b2ssize_10, flatten, Table, Column, Disk, LogicBlockDev, group_by, XMLBuilder,
+                         SimpleTable, AnyXML)
 from cephlib import CephInfo, CephOSD, Host, FileStoreInfo, BlueStoreInfo, CephIOStats
 
 from .cluster import Cluster
-from .visualize_utils import tab, partition_by_len, table_to_doc
+from .visualize_utils import tab, partition_by_len, table_to_xml_doc
 from .obj_links import host_link, osd_link, mon_link
 
 
 @tab("Hosts configs")
-def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> XMLBuilder:
+def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> AnyXML:
     mon_hosts = {mon.host.name for mon in ceph.mons.values()}
 
     host2osds: Dict[str, Set[int]] = {}
@@ -93,10 +93,12 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> XMLBuilder:
     assert '_no_root' not in root_names
 
     class HostsConfigTable(Table):
+        __html_classes__ = "table_cr"
+
         count = Column.ed()
         names = Column.list(chars_per_line=40)
         for root_name in root_names:
-            locals()[root_name] = Column.ed(f"osd Column.i for<br>{root_name}")  #
+            locals()[root_name] = Column.ed(f"osd count for<br>{root_name}")  #
 
         no_root = Column.ed("osd with<br>no root")
         has_mon = Column.s()
@@ -114,7 +116,7 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> XMLBuilder:
         first_item = items[0]
         row = configs.next_row()
         row.count = len(items)
-        row.names = [(host_link(itm['name']).link, itm['name']) for itm in items]  # type: ignore
+        row.names = [host_link(itm['name']).link for itm in items]  # type: ignore
 
         row.no_root = first_item["osds_count"][0]  # type: ignore
         for name, vl in zip(root_names, first_item["osds_count"][1:]):  # type: ignore
@@ -128,10 +130,12 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> XMLBuilder:
         row.ceph_client_bw = first_item["client_bw"]
         row.storage_devices = first_item["storage"]
 
-    return table_to_doc(configs, align=Align.center_right, id="table-hosts-info")
+    return table_to_xml_doc(configs, id="table-hosts-info", sortable=True, zebra=True)
 
 
 class HostRunInfo(Table):
+    __html_classes__ = "table_cr"
+
     name = Column.s()
     services = Column.s(dont_sort=True)
     ram_total = Column.d("RAM total, GiB")
@@ -149,7 +153,7 @@ class HostRunInfo(Table):
 
 
 @tab("Hosts status")
-def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> XMLBuilder:
+def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> AnyXML:
     run_info = HostRunInfo()
     mon_hosts = {mon.host.name for mon in ceph.mons.values()}
 
@@ -209,10 +213,12 @@ def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> XMLBuilder:
             row.net_err_no_buff = int(host.d_netstat.dropped_no_space_in_q)
             row.net_budget_over = int(host.d_netstat.no_budget)
 
-    return table_to_doc(run_info, align=Align.center_right, id="table-hosts-run-info")
+    return table_to_xml_doc(run_info, id="table-hosts-run-info")
 
 
 class HostInfoNet(Table):
+    __html_classes__ = "table_lc"
+
     name = Column.s()
     type = Column.s()
     duplex = Column.yes_or_no()
@@ -222,7 +228,7 @@ class HostInfoNet(Table):
     roles = Column.s()
 
 
-def host_net_table(host: Host, ceph: CephInfo) -> XMLBuilder:
+def host_net_table(host: Host, ceph: CephInfo) -> AnyXML:
     cluster_networks = [(ceph.public_net, 'ceph-public'), (ceph.cluster_net, 'ceph-cluster')]
 
     table = HostInfoNet()
@@ -266,7 +272,7 @@ def host_net_table(host: Host, ceph: CephInfo) -> XMLBuilder:
         if name != 'lo':
             add_adapter_line(host.net_adapters[name], name)
 
-    return table_to_doc(table, align=Align.left_center, sortable=False, extra_cls="hostinfo-net")
+    return table_to_xml_doc(table, zebra=True, sortable=False, classes="hostinfo-net")
 
 
 def mib_and_mb(x: int) -> str:
@@ -332,7 +338,7 @@ class HostInfoDisks(Table):
 
 def host_disks_table(host: Host, ceph: CephInfo,
                      stor_roles: Dict[str, Dict[str, Set[int]]],
-                     stor_classes: Dict[str, Set[str]]) -> XMLBuilder:
+                     stor_classes: Dict[str, Set[str]]) -> AnyXML:
 
     table = HostInfoDisks()
 
@@ -368,7 +374,7 @@ def host_disks_table(host: Host, ceph: CephInfo,
         row.phy_sec = disk.phy_sec
         row.min_io = disk.min_io
 
-    return table_to_doc(table, extra_cls="hostinfo-disks")
+    return table_to_xml_doc(table, classes="hostinfo-disks", sortable=True, zebra=True)
 
 
 class HostInfoMountable(Table):
@@ -382,7 +388,7 @@ class HostInfoMountable(Table):
     label = Column.s()
 
 
-def host_mountable_table(host: Host, stor_roles: Dict[str, Dict[str, Set[int]]]) -> XMLBuilder:
+def host_mountable_table(host: Host, stor_roles: Dict[str, Dict[str, Set[int]]]) -> AnyXML:
 
     table = HostInfoMountable()
 
@@ -404,7 +410,7 @@ def host_mountable_table(host: Host, stor_roles: Dict[str, Dict[str, Set[int]]])
     for _, disk in sorted(host.disks.items()):
         run_over_children(disk, 0)
 
-    return table_to_doc(table, extra_cls="hostinfo-mountable", sortable=False)
+    return table_to_xml_doc(table, classes="hostinfo-mountable", sortable=False, zebra=True)
 
 
 def host_info(host: Host, ceph: CephInfo) -> XMLBuilder:
@@ -438,7 +444,7 @@ def host_info(host: Host, ceph: CephInfo) -> XMLBuilder:
 
 
 @tab("Hosts PG's info")
-def show_hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> XMLBuilder:
+def show_hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> AnyXML:
     header_row = ["Name",
                   "PGs",
                   "User data TiB",
@@ -472,4 +478,4 @@ def show_hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> XMLBuilder:
             table.next_row()
 
     tid = "table-hosts-pg-info-long" if cluster.has_second_report else "table-hosts-pg-info"
-    return table_to_doc(table, id=tid, align=Align.center_right)
+    return table_to_xml_doc(table, id=tid, classes="table_cr", zebra=True, sortable=True)
