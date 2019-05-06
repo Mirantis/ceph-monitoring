@@ -53,7 +53,7 @@ class CephLoader:
         self.osd_dev_cfg: Dict[int, OSDDevCfg] = {}
         for osd in self.osd_df.nodes:
             try:
-                self.osd_dev_cfg[osd.id] = OSDDevCfg.from_json(self.storage.json.osd[str(osd.id)].devs_cfg)
+                self.osd_dev_cfg[osd.id] = OSDDevCfg.convert(self.storage.json.osd[str(osd.id)].devs_cfg)
             except KeyError:
                 pass
 
