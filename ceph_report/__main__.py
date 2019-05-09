@@ -104,6 +104,9 @@ def parse_args(argv: List[str]) -> Any:
     historic_iostat.add_argument('--duration', metavar='SECONDS', default=60, type=int, help='Ceph op keep duration')
     historic_iostat.add_argument('--min-duration', metavar='MS', default=50, type=int,
                                 help='Min operation duration to collect')
+    historic_iostat.add_argument('--pool-timeout', metavar='SECONDS', default=None, type=int,
+                                help='Pool new data every')
+    historic_iostat.add_argument('--history-size', metavar='ticks', default=10, type=int)
 
     # ------------------------------------------------------------------------------------------------------------------
     for parser in (collect_parser, historic_start, historic_stop, historic_collect,
@@ -259,7 +262,7 @@ def main(argv: List[str]) -> int:
                                          'historic_stop', 'historic_collect', 'historic_remove'):
                 asyncio.run(historic_main(opts, opts.subparser_name))
             elif opts.subparser_name == 'iostat':
-                asyncio.run(pool_iostat(opts))
+                asyncio.run(pool_iostat(opts.ceph_master, opts.timeout))
             elif opts.subparser_name == 'historic':
                 asyncio.run(historic_iostat(opts))
             else:
