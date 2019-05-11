@@ -1,3 +1,4 @@
 aiohttp
 cephlib
 xmlbuilder3
+msgpack

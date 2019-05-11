@@ -466,7 +466,7 @@ async def status_historic(conn_pool: ConnectionPool, inventory: Inventory) -> No
             logger.error(f"{hostname} Failed: {res}")
         elif res:
             hst: HistoricCollectionStatus = cast(HistoricCollectionStatus, res)
-            status = 'RUNNING' if hst.cfg else 'NOT_RUNNING'
+            status = 'RUNNING' if hst.running else 'NOT_RUNNING'
             logger.info(f"{hostname} | {status:>10s} | {b2ssize(hst.file_size):>10s}B")
 
 

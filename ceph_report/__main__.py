@@ -5,9 +5,9 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Any, Dict
+from typing import List, Any
 
-from ceph_report.cli import pool_iostat, historic_iostat
+from ceph_report.cli import pool_iostat, historic_iostat, historic_set, historic_get_settings
 
 try:
     import stackprinter
@@ -108,9 +108,16 @@ def parse_args(argv: List[str]) -> Any:
                                 help='Pool new data every')
     historic_iostat.add_argument('--history-size', metavar='ticks', default=10, type=int)
 
+    historic_set = subparsers.add_parser('historic_set', help='Set historic settings')
+    historic_set.add_argument('--size', metavar='OPS_TO_RECORD', default=20, type=int,
+                              help='Collect X slowest requests for each given period')
+    historic_set.add_argument('--duration', metavar='SECONDS', default=600, type=int, help='Ceph op keep duration')
+
+    historic_get = subparsers.add_parser('historic_get', help='Get current historic settings')
+
     # ------------------------------------------------------------------------------------------------------------------
     for parser in (collect_parser, historic_start, historic_stop, historic_collect,
-                   historic_status, upload, historic_remove, historic_iostat, pool_load):
+                   historic_status, upload, historic_remove, historic_iostat, pool_load, historic_set, historic_get):
         parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                             help="Console log level, see logging.json for defaults")
         parser.add_argument("--persistent-log", action="store_true",
@@ -132,7 +139,7 @@ def parse_args(argv: List[str]) -> Any:
     # ------------------------------------------------------------------------------------------------------------------
 
     for parser in (collect_parser, historic_start, historic_stop, historic_collect, historic_status, historic_remove,
-                   historic_iostat, pool_load):
+                   historic_iostat, pool_load, historic_set, historic_get):
         parser.add_argument("--ceph-master", metavar="NODE", default=None,
                             help="Run all ceph cluster commands from NODE, (first inventory node by default)")
         parser.add_argument("--must-connect-to-all", action="store_true",
@@ -265,6 +272,10 @@ def main(argv: List[str]) -> int:
                 asyncio.run(pool_iostat(opts.ceph_master, opts.timeout))
             elif opts.subparser_name == 'historic':
                 asyncio.run(historic_iostat(opts))
+            elif opts.subparser_name == 'historic_set':
+                asyncio.run(historic_set(opts))
+            elif opts.subparser_name == 'historic_get':
+                asyncio.run(historic_get_settings(opts))
             else:
                 print("Not implemented", file=sys.stderr)
                 return 1

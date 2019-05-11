@@ -3,10 +3,10 @@ import logging
 import contextlib
 import collections
 from dataclasses import dataclass
-from typing import List, Any, Optional, Dict, Callable, Coroutine, AsyncIterable, Tuple, Iterator
+from typing import List, Any, Optional, Dict, Callable, Coroutine, AsyncIterable, Tuple, Iterator, AsyncIterator, \
+    Iterable
 
-from aiorpc import IAIORPCNode, ConnectionPool, HistoricCollectionStatus, iter_unreachable
-from aiorpc.plugins.ceph import unpack_historic_simple
+from aiorpc import IAIORPCNode, ConnectionPool, HistoricCollectionStatus, iter_unreachable, unpack_historic_data
 from aiorpc.service import (get_config as get_aiorpc_config, get_http_conn_pool_from_cfg, get_inventory_path,
                             AIORPCServiceConfig)
 from cephlib import RadosDF, CephRole, CephReport
@@ -112,23 +112,11 @@ async def connect_to_cluster(ceph_master: str, ceph_extra_args: Optional[List[st
         )
 
 
-@dataclass
-class OpsRecord:
-    ctime: float
-    rados_df: RadosDF
-    ops: List[Dict]
-
-
-async def iter_historic(clconn: ClusterConnection,
-                        size: int,
-                        duration: int,
-                        ceph_extra_args: Optional[List[str]],
-                        pool_timeout: int) -> AsyncIterable[OpsRecord]:
-
-    node2osds: Dict[str, List[int]] = {}
-    for meta in clconn.ceph_report.osd_metadata:
-        node2osds.setdefault(meta.hostname, []).append(meta.id)
-
+async def configure_historic(clconn: ClusterConnection,
+                             size: int,
+                             duration: int,
+                             ceph_extra_args: Optional[List[str]],
+                             node2osds: Dict[str, List[int]]) -> Dict[str, List[int]]:
     historic_params = {
         'size': size,
         'duration': duration,
@@ -158,19 +146,62 @@ async def iter_historic(clconn: ClusterConnection,
         if osd_ids:
             initiated_osds[node] = osd_ids
         elif osd_ids is None:
-            logger.error(f"Background historic collection is running on node {node}. Stop it first")
-            return
+            logger.warning(f"Background historic collection is running on node {node}. Exclude node")
         else:
             logger.warning(f"No osd's found for node {node} with osd role")
 
-    if len(initiated_osds) == 0:
-        logger.warning("No suitable nodes found. Exit")
-        return
+    return initiated_osds
 
-    async def collect_node(node: str, conn: IAIORPCNode) -> Optional[List[Dict]]:
+
+def get_node2osds(clconn: ClusterConnection) -> Dict[str, List[int]]:
+    node2osds: Dict[str, List[int]] = {}
+    for meta in clconn.ceph_report.osd_metadata:
+        node2osds.setdefault(meta.hostname, []).append(meta.id)
+    return node2osds
+
+
+@contextlib.asynccontextmanager
+async def with_hist_settings(clconn: ClusterConnection,
+                             size: int,
+                             duration: int,
+                             ceph_extra_args: Optional[List[str]],
+                             def_size: int = 20,
+                             def_duration: int = 600) -> AsyncIterator[Dict[str, List[int]]]:
+    node2osds = get_node2osds(clconn)
+
+    conf = await configure_historic(clconn, size, duration, ceph_extra_args, node2osds)
+    try:
+        yield conf
+    finally:
+        await configure_historic(clconn, def_size, def_duration, ceph_extra_args, node2osds)
+
+
+@dataclass
+class OpsRecord:
+    ctime: float
+    rados_df: RadosDF
+    ops: List[Dict]
+
+
+async def iter_historic(clconn: ClusterConnection,
+                        size: int,
+                        duration: int,
+                        ceph_extra_args: Optional[List[str]],
+                        pool_timeout: int,
+                        initiated_osds: Dict[str, List[int]]) -> AsyncIterable[OpsRecord]:
+
+    historic_params = {
+        'size': size,
+        'duration': duration,
+        'ceph_extra_args': ceph_extra_args,
+        'cmd_timeout': clconn.aiorpc_cfg.cmd_timeout,
+        'release_i': clconn.ceph_report.version.release.value
+    }
+
+    async def collect_node(node: str, conn: IAIORPCNode) -> List[Dict]:
         data = await conn.proxy.ceph.get_historic(initiated_osds[node], **historic_params)
         if data:
-            return list(unpack_historic_simple(data))
+            return list(unpack_historic_data(data))
         return []
 
     pool_timeout = pool_timeout if pool_timeout else duration / 2
@@ -178,7 +209,7 @@ async def iter_historic(clconn: ClusterConnection,
         fut_rados = clconn.master_conn.run("rados df --format json")
 
         all_ops: List[Dict[str, Any]] = []
-        async for _, ops in clconn.pool.amap(collect_node, osd_nodes):
+        async for _, ops in clconn.pool.amap(collect_node, initiated_osds):
             all_ops.extend(ops)
 
         rados_df_res = await fut_rados
@@ -201,7 +232,7 @@ class HistSummary:
 
 def get_hist_summary(timings: List[float], total_ops: int, dtime: float) -> HistSummary:
     timings.sort()
-    if total_ops == 0:
+    if total_ops == 0 or len(timings) == 0:
         return HistSummary(None, None, None, None, None, None, None, None)
     else:
         not_in_timings = total_ops - len(timings)
@@ -240,42 +271,94 @@ def calc_statistic(history: List[OpsRecord]) -> Iterator[Tuple[int, HistSummary]
         for op in rec.ops:
             per_pool_durations[op['pack_pool_id']].append(op['duration'])
 
-    last_pools_df = {pool.id: pool.write_ops for pool in history[-1].rados_df.pools}
+    last_pools_df = {pool.id: pool.write_ops + pool.read_ops for pool in history[-1].rados_df.pools}
     for first_pool_df in history[0].rados_df.pools:
         if first_pool_df.id in last_pools_df:
-            per_pool_ops[first_pool_df.id] = last_pools_df[first_pool_df.id] - first_pool_df.write_ops
+            per_pool_ops[first_pool_df.id] = last_pools_df[first_pool_df.id] - first_pool_df.write_ops \
+                - first_pool_df.read_ops
 
     for pool_id, ops in per_pool_ops.items():
         yield pool_id, get_hist_summary(per_pool_durations[pool_id], ops, dtime)
 
 
 async def historic_iostat(opts: Any):
-    template = "{:^20s} {:>10s} {:>10s} {:>10s} {:>10s} {:>10s} {:>10s} {:>10s} {:>10s}"
-    tostr = lambda x: '-' if not x else str(int(x))
-
     async with connect_to_cluster(opts.ceph_master, opts.ceph_extra_args) as clconn:
-        pool_id2name_map: Dict[int, str] = {pool.pool: pool.pool_name for pool in clconn.ceph_report.osdmap.pools}
-        history: List[OpsRecord] = []
+        async with with_hist_settings(clconn, opts.size, opts.duration, opts.ceph_extra_args) as initiated_osds:
+            if len(initiated_osds) == 0:
+                logger.warning("No suitable nodes found. Exit")
+                return
 
-        async for rec in iter_historic(clconn, opts.size, opts.duration, opts.ceph_extra_args, opts.pool_timeout):
-            history = history[-opts.history_size:] + [rec]
-            first = True
-            for pool_id, summary in sorted(calc_statistic(history)):
-                name = pool_id2name_map[pool_id]
+            pool_id2name_map: Dict[int, str] = {pool.pool: pool.pool_name for pool in clconn.ceph_report.osdmap.pools}
+            history: List[OpsRecord] = []
 
-                if first:
-                    header = template.format("Pool name", "iops", ">50ms", ">100ms", "avg, ms", "p50 ms", "p95 ms",
-                                             "p99 ms", "Slowest")
-                    print(f"{header}\n{'-' * len(header)}")
-                    first = False
+            template = "{:^%ss} {:>10s} {:>10s} {:>10s} {:>10s} {:>10s} {:>10s} {:>10s} {:>10s}" % \
+                max(map(len, pool_id2name_map.values()))
+            tostr = lambda x: '-' if not x else str(int(x))
 
-                print(template.format(name, tostr(summary.iops), tostr(summary.total_50ms),
-                                      tostr(summary.total_100ms), tostr(summary.avg),
-                                      tostr(summary.ppc50), tostr(summary.ppc95), tostr(summary.ppc99),
-                                      tostr(summary.slowest)))
+            itr = iter_historic(clconn, opts.size, opts.duration, opts.ceph_extra_args,
+                                opts.pool_timeout, initiated_osds)
 
-            if not first:
-                print("\n\n")
+            async for rec in itr:
+                history = history[-opts.history_size:] + [rec]
+                first = True
+                for pool_id, summary in sorted(calc_statistic(history)):
+                    name = pool_id2name_map[pool_id]
+
+                    if first:
+                        header = template.format("Pool name", "iops", ">50ms", ">100ms", "avg, ms", "p50 ms", "p95 ms",
+                                                 "p99 ms", "Slowest")
+                        print(f"{header}\n{'-' * len(header)}")
+                        first = False
+
+                    print(template.format(name, tostr(summary.iops), tostr(summary.total_50ms),
+                                          tostr(summary.total_100ms), tostr(summary.avg),
+                                          tostr(summary.ppc50), tostr(summary.ppc95), tostr(summary.ppc99),
+                                          tostr(summary.slowest)))
+
+                if not first:
+                    print("\n\n")
+
+
+# for name, count in sorted(ops_per_volume.items(), key=lambda x: x[1])[:10]:
+#     print(f"{name:>30} {count}")
+
+
+def get_rbd_vol_loads(ops: Iterable[Dict]) -> Dict[str, int]:
+    ops_per_volume: Dict[str, int] = collections.Counter()
+    for op in ops:
+        name = op.get('obj_name')
+        if name and ":::rbd_data." in name:
+            ops_per_volume[name.split(":::rbd_data.")[1].split(".")[0]] += 1
+    return ops_per_volume
+
+
+async def historic_set(opts: Any):
+    async with connect_to_cluster(opts.ceph_master, opts.ceph_extra_args) as clconn:
+        configured = await configure_historic(clconn, opts.size, opts.duration,
+                                              opts.ceph_extra_args, get_node2osds(clconn))
+        for node, osds in configured.items():
+            logger.info(f"Node {node} - {len(osds)} osds configured")
+
+
+async def historic_get_settings(opts: Any):
+
+    settings: Dict[str, Tuple[int, float]] = {}
+    async with connect_to_cluster(opts.ceph_master, opts.ceph_extra_args) as clconn:
+        node2osds = get_node2osds(clconn)
+        async def get_node_historic_settings(node: str, conn: IAIORPCNode) -> Dict[int, Tuple[int, float]]:
+            return await conn.proxy.ceph.get_historic_settings(node2osds[node],
+                                                               opts.ceph_extra_args,
+                                                               cmd_timeout=clconn.aiorpc_cfg.cmd_timeout,
+                                                               release_i=clconn.ceph_report.version.release.value)
+
+        async for _, node_settings in clconn.pool.amap(get_node_historic_settings, node2osds.keys()):
+            common_osds = set(settings) & set(node_settings)
+            assert not common_osds, f"Doubled osds {common_osds}"
+            settings.update(node_settings)
+
+        print(f"OSD_ID   SIZE  DURATION")
+        for osd_id, (size, duration) in sorted(settings.items(), key=lambda x: int(x[0])):
+            print(f"{osd_id:>5s}   {size:>5d}  {int(duration):>5d}")
 
 # TODO: per pool slow iops
 # per rbd drive slow iops
