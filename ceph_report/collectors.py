@@ -321,8 +321,15 @@ async def collect_osd(c: CephCollector) -> None:
     ids_from_ceph = [meta.id for meta in c.report.osd_metadata if meta.hostname == c.hostname]
     unexpected_osds = set(running_osds).difference(ids_from_ceph)
 
+    logger.info(f"Found next running osd's on node {c.hostname}: {list(running_osds.keys())}")
+    logger.info(f"Expecting next osd's for {c.hostname}: {ids_from_ceph}")
+
     for osd_id in unexpected_osds:
         logger.warning(f"Unexpected osd-{osd_id} in node {c.hostname}")
+
+    not_runnig = set(ids_from_ceph).difference(running_osds)
+    if not_runnig:
+        logger.warning(f"Next osd's not running on node {c.hostname}: {list(not_runnig)}")
 
     c_host = c.chdir(f"hosts/{c.hostname}")
     cephdisklist_js, cephvollist_js, lsblk_js = await asyncio.gather(

@@ -6,10 +6,10 @@ import numpy
 from dataclasses import dataclass
 
 from koder_utils import (b2ssize, b2ssize_10, LogicBlockDev, DiskType, Disk, seconds_to_str_simple, group_by,
-                         ok, fail, SimpleTable, Column, Table, RawContent, AnyXML)
+                         ok, fail, SimpleTable, Column, Table, RawContent, AnyXML, partition_by_len)
 
 from cephlib import CephInfo, OSDStatus, CephVersion, BlueStoreInfo, FileStoreInfo, CephOSD
-from .visualize_utils import tab, partition_by_len, to_html_histo, plot, table_to_xml_doc
+from .visualize_utils import tab, to_html_histo, plot, table_to_xml_doc
 from .obj_links import osd_link, host_link
 from .checks import expected_wr_speed
 from .plot_data import get_histo_img
@@ -223,6 +223,7 @@ def show_osd_proc_info(ceph: CephInfo) -> AnyXML:
 def show_osd_info(ceph: CephInfo) -> AnyXML:
     class OSDInfoTable(Table):
         __html_classes__ = "table_lr"
+
         count = Column.ed()
         ids = Column.list(chars_per_line=50)
         node = Column.s()
@@ -265,7 +266,7 @@ def show_osd_info(ceph: CephInfo) -> AnyXML:
         row = table.next_row()
 
         row.count = len(osd_infos)
-        row.ids = [(host_link(str(osd_info.id)).link, str(osd_info.id)) for osd_info in osd_infos]
+        row.ids = [host_link(str(osd_info.id)).link for osd_info in osd_infos]
         row.status = osd_info.status
 
         pgs = [ceph.osds[osd_info.id].pg_count for osd_info in osd_infos]
@@ -548,4 +549,4 @@ def show_osd_pool_agg_pg_distribution(ceph: CephInfo) -> Optional[AnyXML]:
 @tab("PG per OSD")
 def show_osd_pg_histo(ceph: CephInfo) -> Optional[RawContent]:
     vals = [osd.pg_count for osd in ceph.osds.values() if osd.pg_count is not None]
-    return RawContent(get_histo_img(numpy.array(vals))) if vals else None
+    return RawContent(get_histo_img(numpy.array(vals), y_ticks=True)) if vals else None

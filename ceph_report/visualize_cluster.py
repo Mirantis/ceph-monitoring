@@ -2,17 +2,17 @@ import time
 import logging
 import datetime
 import collections
-from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 import yaml
 
 from koder_utils import (b2ssize_10, b2ssize, Table, Column, seconds_to_str, table_to_html, XMLBuilder, fail, ok,
-                         SimpleTable, AnyXML, htag, RawContent)
+                         SimpleTable, AnyXML, htag, RawContent, partition_by_len)
 from cephlib import CephInfo, FileStoreInfo, BlueStoreInfo, Pool, get_rule_replication_level, get_rule_osd_class
 
+from . import get_file
 from .cluster import Cluster
-from .visualize_utils import tab, partition_by_len, table_to_xml_doc
+from .visualize_utils import tab, table_to_xml_doc
 from .checks import run_all_checks, CheckMessage
 from .report import Report
 from .obj_links import err_link, mon_link, pool_link
@@ -76,10 +76,10 @@ def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report) -> None:
     """
     Cluster issues
     """
-    config = yaml.load((Path(__file__).parent / 'files' / 'check_conf.yaml').open())
+    config = yaml.safe_load(get_file('check_conf.yaml').open())
     check_results = run_all_checks(config, cluster, ceph)
 
-    t = SimpleTable("Check", "Result", "Comment")
+    t = SimpleTable("Check", "Result", "Comment", c_width=[40, 5, 55])
 
     failed = fail("Failed")
     passed = ok("Passed")
@@ -92,9 +92,7 @@ def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report) -> None:
         for err in result.fails:
             err_per_test[err.reporter_id].append(err)
 
-    tbl = table_to_html(t)
-    tbl(id="table-issues", sortable='false')
-    report.add_block('issues', "Issues:", tbl)
+    report.add_block('issues', "Issues:", table_to_xml_doc(t, id="table-issues", sortable=False, zebra=True))
 
     for reporter_id, errs in err_per_test.items():
         table = SimpleTable("Services", "Serv.<br>count", "Error")
@@ -284,13 +282,13 @@ def show_primary_settings(ceph: CephInfo) -> AnyXML:
         table.add_row("Journal dio", ceph.settings.journal_dio)
         table.add_row("Filestorage sync", str(int(float(ceph.settings.filestore_max_sync_interval))) + 's')
 
-    return table_to_xml_doc(table, id="table-settings")
+    return table_to_xml_doc(table, id="table-settings", zebra=True)
 
 
 class RulesetsTable(Table):
     rule = Column.s(help="Rule name")
     id = Column.ed(help="Rule id")
-    pools = Column.list(help="Pools, this rule is used for")
+    pools = Column.list(help="Pools, this rule is used for", width=20)
     osd_class = Column.s(help='OSD class used int his rule')
     replication_level = Column.s("Replication<br>level", help='Level on which this rule doing replication')
     pg = Column.s("PG", help='Total PG count, managed by this rule')

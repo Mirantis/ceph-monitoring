@@ -211,5 +211,5 @@ def show_pg_state(ceph: CephInfo) -> AnyXML:
 def show_pg_size_kde(ceph: CephInfo) -> Optional[RawContent]:
     if ceph.pgs:
         vals = [pg.stat_sum.num_bytes / 2 ** 30 for pg in ceph.pgs.pg_stats]
-        return RawContent(get_histo_img(numpy.array(vals), xlabel="PG size GiB", y_ticks=True))
+        return RawContent(get_histo_img(numpy.array(vals), xlabel="PG size GiB", y_ticks=True, ylogscale=True))
     return None

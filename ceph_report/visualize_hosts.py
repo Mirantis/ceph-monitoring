@@ -2,11 +2,11 @@ import collections
 from typing import Dict, List, Union, Optional, Tuple, Set
 
 from koder_utils import (b2ssize, b2ssize_10, flatten, Table, Column, Disk, LogicBlockDev, group_by, XMLBuilder,
-                         SimpleTable, AnyXML)
+                         SimpleTable, AnyXML, partition_by_len)
 from cephlib import CephInfo, CephOSD, Host, FileStoreInfo, BlueStoreInfo, CephIOStats
 
 from .cluster import Cluster
-from .visualize_utils import tab, partition_by_len, table_to_xml_doc
+from .visualize_utils import tab, table_to_xml_doc
 from .obj_links import host_link, osd_link, mon_link
 
 
@@ -249,9 +249,10 @@ def host_net_table(host: Host, ceph: CephInfo) -> AnyXML:
 
     # first show bonds
     for _, bond in sorted(host.bonds.items()):
-        assert bond.name in all_ifaces
-        all_ifaces.remove(bond.name)
-        adapter = host.net_adapters[bond.name]
+        dev_name = bond.name.split('/')[-1]
+        assert dev_name in all_ifaces, f"{dev_name!r} not in {all_ifaces} for host {host.name}"
+        all_ifaces.remove(dev_name)
+        adapter = host.net_adapters[dev_name]
         add_adapter_line(adapter, adapter.dev)
 
         for src in bond.sources:
@@ -261,7 +262,7 @@ def host_net_table(host: Host, ceph: CephInfo) -> AnyXML:
                              f'<div class="disk-children-1">+{src}</dev>')
 
         for adapter_name in list(all_ifaces):
-            if adapter_name.startswith(bond.name + '.'):
+            if adapter_name.startswith(dev_name + '.'):
                 all_ifaces.remove(adapter_name)
                 add_adapter_line(host.net_adapters[adapter_name],
                                  f'<div class="disk-children-2">->{adapter_name}</dev>')

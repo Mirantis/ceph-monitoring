@@ -30,7 +30,7 @@ from .report import Report
 
 # ----------------------------------------------------------------------------------------------------------------------
 
-logger = logging.getLogger('cephlib.report')
+logger = logging.getLogger('report')
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -72,12 +72,15 @@ def plot_img(func: Callable, *args, **kwargs) -> str:
 
 @plot
 @tab("OSD used space")
-def show_osd_used_space_histo(ceph: CephInfo) -> Optional[AnyStr]:
+def show_osd_used_space_histo(ceph: CephInfo) -> Optional[RawContent]:
     min_osd: int = 3
     vals = [(100 - osd.space.free_perc) for osd in ceph.osds.values() if osd.space.free_perc is not None]
     if len(vals) >= min_osd:
-        return plot_img(plot_histo, numpy.array(vals), left=0, right=100, ax=True,   # type: ignore
-                        xlabel="OSD used space GiB", y_ticks=True)
+        img = plot_img(plot_histo, numpy.array(vals), left=0, right=100, ax=True,   # type: ignore
+                       xlabel="OSD used space GiB",
+                       y_ticks=True,
+                       ylogscale=True)
+        return RawContent(img)
     return None
 
 

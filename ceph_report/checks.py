@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import List, Dict, Callable, Any, Optional, Tuple
 
 from koder_utils import b2ssize, DiskType
-from cephlib import FileStoreInfo, BlueStoreInfo, CephInfo
+from cephlib import FileStoreInfo, BlueStoreInfo, CephInfo, Crush
 
 from .cluster import Cluster
 
@@ -40,7 +40,7 @@ from .cluster import Cluster
 # network/storage devices with no load
 
 
-logger = logging.getLogger("cephlib.checks")
+logger = logging.getLogger("report")
 
 
 class Severity(Enum):
@@ -151,8 +151,8 @@ def no_scrub_errors(config: CheckConfig, _: Cluster, ceph: CephInfo, report: Che
     err_per_osd: Dict[int, int] = {}
     for osd in ceph.sorted_osds:
         assert osd.pg_stats
-        err_per_osd[osd.id] = osd.pg_stats.scrub_errors + osd.pg_stats.deep_scrub_errors + \
-            osd.pg_stats.shallow_scrub_errors
+        err_per_osd[osd.id] = osd.pg_stats.num_scrub_errors + osd.pg_stats.num_deep_scrub_errors + \
+            osd.pg_stats.num_shallow_scrub_errors
 
     for osd_id, err_count in sorted(err_per_osd.items()):
         if err_count > 0:
@@ -308,11 +308,11 @@ def pg_eq_pgp(config: CheckConfig, _: Cluster, ceph: CephInfo, report: CheckRepo
 def pg_in_empty_pools(config: CheckConfig, _: Cluster, ceph: CephInfo, report: CheckReport):
     sett = config.get("almost_empty_pool", {})
     min_cluster_data = sett.get("min_total_GiB", 100) * 1024 ** 3
-    if ceph.status.data_bytes < min_cluster_data:
+    if ceph.status.pgmap.data_bytes < min_cluster_data:
         return
 
     data_part = sett.get("data_part", 0.0001)
-    max_bytes = ceph.status.data_bytes * data_part
+    max_bytes = ceph.status.pgmap.data_bytes * data_part
     max_pg = sett.get("max_pg", 128)
     max_pg_per_osd = sett.get("max_pg_per_osd", 1)
     max_pg_for_empty_pool = max([max_pg, len(ceph.osds) * max_pg_per_osd])
@@ -338,10 +338,10 @@ def large_pools_pg(config: CheckConfig, _: Cluster, ceph: CephInfo, report: Chec
     sett = config.get("large_pools", {})
     min_cluster_data = sett.get("min_total_GiB", 100) * 1024 ** 3
 
-    if ceph.status.data_bytes < min_cluster_data:
+    if ceph.status.pgmap.data_bytes < min_cluster_data:
         return
 
-    min_large_pool_data = sett.get("large_pool_data_part", 0.05) * ceph.status.data_bytes
+    min_large_pool_data = sett.get("large_pool_data_part", 0.05) * ceph.status.pgmap.data_bytes
     min_size_diff = sett.get("min_size_diff", 1.5)
 
     pgs_and_data = []
@@ -370,8 +370,9 @@ def replication_level_same_size(config: CheckConfig, _: Cluster, ceph: CephInfo,
         return
 
     passed = True
-    for root in ceph.crush.crushmap.roots:
-        childs = root.childs
+    for rule in ceph.crush.rules:
+        root = ceph.crush.get_root_bucket_for_rule(rule)
+        childs = [ceph.crush.bucket_by_id(bitem.id) for bitem in root.items]
         if len(childs) == 3:
             if abs(childs[0].weight - childs[1].weight) > 1 or abs(childs[2].weight - childs[1].weight) > 1:
                 report.add_extra_message(Severity.warning, f"root {root.name} has 3 top childs with different weights")
@@ -392,7 +393,7 @@ def all_osds_in_root_the_same(config: CheckConfig, _: Cluster, ceph: CephInfo, r
     failed_size = False
     failed_type = False
 
-    for rule in ceph.crush.crushmap.rules:
+    for rule in ceph.crush.rules:
         osds_with_w = list(ceph.crush.iter_osds_for_rule(rule))
 
         sizes: Dict[int, int] = collections.Counter()
@@ -466,12 +467,12 @@ def osd_of_same_size_has_close_load(config: CheckConfig, _: Cluster, ceph: CephI
         collections.defaultdict(lambda: collections.defaultdict(list))
     for osd in ceph.osds.values():
         if osd.space.total:
-            for attr in ("reads", "writes", "read_b", "write_b"):
+            for attr in ("num_read", "num_write", "num_read_kb", "num_write_kb"):
                 io_per_osd[attr][osd.space.total].append((getattr(osd.pg_stats, attr), osd.id))
 
     sett = config.get("max_load_diff", {})
     min_ops = sett.get("min_mops", 1) * 1000000
-    min_bytes = sett.get("min_GiB", 100) * 1024 ** 3
+    min_kb = sett.get("min_GiB", 100) * 1024 ** 2
     max_diff = sett.get("max_diff", 0.2)
     failed = False
     for name, dct in io_per_osd.items():
@@ -480,7 +481,7 @@ def osd_of_same_size_has_close_load(config: CheckConfig, _: Cluster, ceph: CephI
             min_osd_ops, osd_min_id = min(ops)
             if name in ('reads', 'writes') and max_osd_ops < min_ops:
                 continue
-            if name in ('read_b', 'write_b') and min_osd_ops < min_bytes:
+            if name in ('read_b', 'write_b') and min_osd_ops < min_kb:
                 continue
 
             diff = abs((max_osd_ops - min_osd_ops) / max_osd_ops)

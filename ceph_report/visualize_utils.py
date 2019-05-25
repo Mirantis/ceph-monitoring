@@ -118,39 +118,3 @@ def to_html_histo(vals: Sequence[Union[int, float]],
             msg = f"min = {fmt(p0)}<br>25% < {fmt(p25)}<br>mediana = {fmt(p50)}<br>75% < {fmt(p75)}"  # type: ignore
             msg += f"<br>90% < {fmt(p90)}<br>95% < {fmt(p95)}<br>max = {fmt(p100)}"  # type: ignore
             return msg, p50
-
-
-T = TypeVar('T')
-
-
-def partition(items: Iterable[T], size: int) -> Iterable[List[T]]:
-    curr = []
-    for idx, val in enumerate(items):
-        curr.append(val)
-        if (idx + 1) % size == 0:
-            yield curr
-            curr = []
-
-    if curr:
-        yield curr
-
-
-def partition_by_len(items: Iterable[Union[T, Tuple[T, int]]],
-                     chars_per_line: int, delimiter_len: int) -> Iterable[List[T]]:
-    curr: List[T] = []
-    curr_len = 0
-    for el_r in items:
-        if isinstance(el_r, tuple):
-            el, el_len = el_r
-        else:
-            el = el_r
-            el_len = len(str(el))
-        if curr_len + delimiter_len + el_len <= chars_per_line:
-            curr.append(el)
-            curr_len += delimiter_len + el_len
-        else:
-            yield curr
-            curr = [el]
-            curr_len = el_len
-    if curr:
-        yield curr

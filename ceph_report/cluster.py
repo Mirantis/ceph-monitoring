@@ -17,7 +17,7 @@ from koder_utils.linux import parse_meminfo
 
 from .ceph_loader import CephLoader
 
-logger = logging.getLogger("ceph_report")
+logger = logging.getLogger("report")
 
 
 @dataclass

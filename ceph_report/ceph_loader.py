@@ -12,7 +12,7 @@ from cephlib import (PGDump, StatusRegion, MonRole, Host, CephInfo, CephOSD, OSD
                      OSDDevCfg)
 
 
-logger = logging.getLogger("ceph_report")
+logger = logging.getLogger("report")
 
 
 NO_VALUE = -1
